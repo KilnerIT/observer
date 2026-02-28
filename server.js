@@ -1,11 +1,12 @@
 /**
- * Observer Central - Enterprise Infrastructure Hub v1.6.0
+ * Observer Central - Enterprise Infrastructure Hub v1.6.1
  * Features:
  * - Archive Node Functionality (Hides nodes without deleting)
  * - Important Client Tagging (Star/Highlight high-priority endpoints)
  * - Location Tagging Support
  * - iOS PWA Hardening
  * - Firebase Persistent Storage
+ * - Bugfix: Robust merging logic to prevent HTTP 400 errors
  */
 
 const http = require('http');
@@ -19,7 +20,7 @@ const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/aut
 const { getFirestore, doc, setDoc, getDoc, collection, getDocs, updateDoc } = require('firebase/firestore');
 
 // --- CONFIGURATION ---
-const VERSION = '1.6.0'; 
+const VERSION = '1.6.1'; 
 const PORT = process.env.PORT || 8080; 
 const OFFLINE_THRESHOLD = 60000;
 const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
@@ -37,11 +38,13 @@ if (process.env.FIREBASE_API_KEY) {
         appId: process.env.FIREBASE_APP_ID
     };
 } else if (fs.existsSync(CONFIG_PATH)) {
-    firebaseConfig = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+    try {
+        firebaseConfig = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+    } catch(e) { console.error("Config parse failed"); }
 }
 
 const appId = typeof __app_id !== 'undefined' ? __app_id : (process.env.OBSERVER_APP_ID || 'observer-prod');
-const app = initializeApp(firebaseConfig);
+const app = initializeApp(firebaseConfig || { apiKey: "none" });
 const auth = getAuth(app);
 const db = getFirestore(app);
 
@@ -54,8 +57,10 @@ onAuthStateChanged(auth, async (user) => {
     currentUser = user;
     if (user) {
         console.log(`[SYSTEM] Authenticated. Loading persistence for ${appId}...`);
-        const snapshot = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'nodes'));
-        snapshot.forEach(d => nodes.set(d.id, d.data()));
+        try {
+            const snapshot = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'nodes'));
+            snapshot.forEach(d => nodes.set(d.id, d.data()));
+        } catch(e) { console.error("Recovery failed:", e.message); }
     }
 });
 
@@ -80,41 +85,65 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/sw.js') {
         res.writeHead(200, { 'Content-Type': 'application/javascript' });
         return res.end(`self.addEventListener('push', e => {
-            const d = e.data ? e.data.json() : { title: "Observer Alert", body: "Change detected" };
+            let d = { title: "Observer Alert", body: "Change detected" };
+            try { d = e.data.json(); } catch(err) {}
             e.waitUntil(self.registration.showNotification(d.title, { body: d.body, icon: "https://cdn-icons-png.flaticon.com/512/564/564348.png" }));
         });`);
     }
 
-    // API: Heartbeat
+    // API: Heartbeat (Fixed Merge Logic)
     if (url.pathname === '/api/heartbeat' && req.method === 'POST') {
         let body = '';
         req.on('data', chunk => body += chunk);
         req.on('end', async () => {
             try {
                 const data = JSON.parse(body);
+                if (!data.id) throw new Error("Missing ID");
+
                 const existing = nodes.get(data.id) || { scannedDevices: [], isArchived: false };
                 
-                // If node is archived, we might want to unarchive it on check-in
-                if (existing.isArchived) { existing.isArchived = false; }
+                // Reset archive status if node reports in
+                const isArchived = existing.isArchived || false;
 
-                const currentScans = data.scannedDevices || [];
-                const mergedDevices = [...(existing.scannedDevices || [])];
+                const currentScans = Array.isArray(data.scannedDevices) ? data.scannedDevices : [];
+                const mergedDevices = Array.isArray(existing.scannedDevices) ? [...existing.scannedDevices] : [];
 
                 currentScans.forEach(newDev => {
-                    const idx = mergedDevices.findIndex(d => d.ip === newDev.ip);
+                    if (!newDev || !newDev.ip) return;
+                    const idx = mergedDevices.findIndex(d => d && d.ip === newDev.ip);
                     if (idx > -1) { 
-                        // Keep 'important' flag from existing data
-                        mergedDevices[idx] = { ...newDev, isImportant: mergedDevices[idx].isImportant, lastSeen: Date.now() }; 
+                        // Safe merge: preserve 'isImportant' and 'firstSeen'
+                        const oldDev = mergedDevices[idx];
+                        mergedDevices[idx] = { 
+                            ...newDev, 
+                            isImportant: !!oldDev.isImportant, 
+                            firstSeen: oldDev.firstSeen || Date.now(),
+                            lastSeen: Date.now() 
+                        }; 
                     } else { 
                         mergedDevices.push({ ...newDev, isImportant: false, firstSeen: Date.now(), lastSeen: Date.now() }); 
                     }
                 });
 
-                const nodeUpdate = { ...existing, ...data, scannedDevices: mergedDevices, lastSeen: Date.now(), ip: req.socket.remoteAddress };
+                const nodeUpdate = { 
+                    ...existing, 
+                    ...data, 
+                    isArchived: false, // Unarchive on heartbeat
+                    scannedDevices: mergedDevices, 
+                    lastSeen: Date.now(), 
+                    ip: req.socket.remoteAddress.replace('::ffff:', '') 
+                };
+
                 nodes.set(data.id, nodeUpdate);
                 if (currentUser) setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'nodes', data.id), nodeUpdate);
-                res.writeHead(200); res.end(JSON.stringify({ status: 'ok' }));
-            } catch (e) { res.writeHead(400); res.end('Error'); }
+                
+                res.writeHead(200); 
+                res.end(JSON.stringify({ status: 'ok' }));
+            } catch (e) { 
+                console.error("[API ERROR]", e.message); 
+                res.writeHead(400); 
+                res.end('Error'); 
+            }
         });
     }
 
@@ -123,14 +152,16 @@ const server = http.createServer(async (req, res) => {
         let body = '';
         req.on('data', chunk => body += chunk);
         req.on('end', async () => {
-            const { nodeId, archive } = JSON.parse(body);
-            const node = nodes.get(nodeId);
-            if (node) {
-                node.isArchived = archive;
-                nodes.set(nodeId, node);
-                if (currentUser) updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'nodes', nodeId), { isArchived: archive });
-            }
-            res.writeHead(200); res.end(JSON.stringify({ status: 'updated' }));
+            try {
+                const { nodeId, archive } = JSON.parse(body);
+                const node = nodes.get(nodeId);
+                if (node) {
+                    node.isArchived = !!archive;
+                    nodes.set(nodeId, node);
+                    if (currentUser) updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'nodes', nodeId), { isArchived: !!archive });
+                }
+                res.writeHead(200); res.end(JSON.stringify({ status: 'updated' }));
+            } catch(e) { res.writeHead(400); res.end('Fail'); }
         });
     }
 
@@ -139,17 +170,19 @@ const server = http.createServer(async (req, res) => {
         let body = '';
         req.on('data', chunk => body += chunk);
         req.on('end', async () => {
-            const { nodeId, clientIp } = JSON.parse(body);
-            const node = nodes.get(nodeId);
-            if (node) {
-                const device = node.scannedDevices.find(d => d.ip === clientIp);
-                if (device) {
-                    device.isImportant = !device.isImportant;
-                    nodes.set(nodeId, node);
-                    if (currentUser) updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'nodes', nodeId), { scannedDevices: node.scannedDevices });
+            try {
+                const { nodeId, clientIp } = JSON.parse(body);
+                const node = nodes.get(nodeId);
+                if (node) {
+                    const device = node.scannedDevices.find(d => d.ip === clientIp);
+                    if (device) {
+                        device.isImportant = !device.isImportant;
+                        nodes.set(nodeId, node);
+                        if (currentUser) updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'nodes', nodeId), { scannedDevices: node.scannedDevices });
+                    }
                 }
-            }
-            res.writeHead(200); res.end(JSON.stringify({ status: 'updated' }));
+                res.writeHead(200); res.end(JSON.stringify({ status: 'updated' }));
+            } catch(e) { res.writeHead(400); res.end('Fail'); }
         });
     }
 
@@ -158,21 +191,23 @@ const server = http.createServer(async (req, res) => {
         let body = '';
         req.on('data', chunk => body += chunk);
         req.on('end', async () => {
-            const { nodeId, clientIp } = JSON.parse(body);
-            const node = nodes.get(nodeId);
-            if (node) {
-                node.scannedDevices = node.scannedDevices.filter(d => d.ip !== clientIp);
-                nodes.set(nodeId, node);
-                if (currentUser) updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'nodes', nodeId), { scannedDevices: node.scannedDevices });
-            }
-            res.writeHead(200); res.end(JSON.stringify({ status: 'deleted' }));
+            try {
+                const { nodeId, clientIp } = JSON.parse(body);
+                const node = nodes.get(nodeId);
+                if (node) {
+                    node.scannedDevices = node.scannedDevices.filter(d => d.ip !== clientIp);
+                    nodes.set(nodeId, node);
+                    if (currentUser) updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'nodes', nodeId), { scannedDevices: node.scannedDevices });
+                }
+                res.writeHead(200); res.end(JSON.stringify({ status: 'deleted' }));
+            } catch(e) { res.writeHead(400); res.end('Fail'); }
         });
     }
 
     // API: Status
     else if (url.pathname === '/api/status') {
         const list = Array.from(nodes.values()).map(n => ({
-            ...n, isOnline: (Date.now() - n.lastSeen) < OFFLINE_THRESHOLD
+            ...n, isOnline: (Date.now() - (n.lastSeen || 0)) < OFFLINE_THRESHOLD
         }));
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(list));
@@ -191,6 +226,7 @@ function generateUI() {
     <html class="dark">
     <head>
         <title>Observer Hub v${VERSION}</title>
+        <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
         <meta name="mobile-web-app-capable" content="yes">
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -231,11 +267,11 @@ function generateUI() {
 
             <div id="explorerView" class="hidden">
                 <div class="flex justify-between items-center mb-8">
-                    <button onclick="showMain()" class="flex items-center gap-2 text-slate-400 hover:text-white transition-colors font-bold text-sm">
+                    <button onclick="showMain()" class="flex items-center gap-2 text-slate-400 hover:text-white transition-colors font-bold text-sm uppercase">
                         <i class="fas fa-chevron-left text-xs"></i> BACK TO FLEET
                     </button>
                     <div class="flex items-center gap-4">
-                        <label class="flex items-center gap-2 text-xs font-bold text-slate-500">
+                        <label class="flex items-center gap-2 text-xs font-bold text-slate-500 cursor-pointer">
                             <input type="checkbox" id="showOnlyImportant" class="rounded border-slate-800 bg-slate-900 text-amber-500 focus:ring-amber-500">
                             IMPORTANT ONLY
                         </label>
@@ -301,44 +337,48 @@ function generateUI() {
 
             function renderGrid(filter) {
                 const grid = document.getElementById('nodeGrid');
-                const nodes = currentData.filter(n => {
+                if(!grid) return;
+                const filtered = currentData.filter(n => {
                     const matchesSearch = (n.hostname || "").toLowerCase().includes(filter) || (n.id || "").toLowerCase().includes(filter);
-                    return matchesSearch && (n.isArchived === showArchived);
+                    return matchesSearch && (!!n.isArchived === showArchived);
                 });
 
-                if (nodes.length === 0) {
+                if (filtered.length === 0) {
                     grid.innerHTML = \`<div class="col-span-full py-20 text-center text-slate-600 italic border-2 border-dashed border-slate-800/50 rounded-3xl">No \${showArchived ? 'archived' : 'active'} nodes found.</div>\`;
                     return;
                 }
 
-                grid.innerHTML = nodes.map(n => \`
+                grid.innerHTML = filtered.map(n => {
+                    const statusClass = n.isOnline ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 'bg-red-500/10 text-red-400 border-red-500/20';
+                    return \`
                     <div class="bg-slate-900/50 border border-slate-800 rounded-3xl p-6 transition-all group relative hover:border-blue-500/50">
                         <div class="flex justify-between items-start mb-6">
                             <div class="p-3 bg-blue-500/10 rounded-2xl"><i class="fas fa-server text-blue-400"></i></div>
                             <div class="flex items-center gap-2">
-                                <button onclick="archiveNode('\${n.id}', \${!n.isArchived})" class="p-2 text-slate-600 hover:text-white transition-colors"><i class="fas fa-archive text-[10px]"></i></button>
-                                <span class="px-2 py-1 rounded-lg text-[9px] font-black uppercase \${n.isOnline ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 'bg-red-500/10 text-red-400 border-red-500/20'}">\${n.isOnline ? 'Online' : 'Offline'}</span>
+                                <button onclick="archiveNode('\${n.id}', \${!n.isArchived})" class="p-2 text-slate-600 hover:text-white transition-colors" title="Archive Node"><i class="fas fa-archive text-[10px]"></i></button>
+                                <span class="px-2 py-1 rounded-lg text-[9px] font-black uppercase \${statusClass}">\${n.isOnline ? 'Online' : 'Offline'}</span>
                             </div>
                         </div>
                         <h3 class="text-xl font-bold text-white mb-0.5 truncate uppercase tracking-tighter font-black">\${n.hostname}</h3>
                         <p class="text-[10px] text-slate-500 font-mono mb-4 uppercase tracking-widest opacity-60">\${n.location || 'Unknown Location'}</p>
                         <div class="grid grid-cols-2 gap-3 mb-6">
-                            <div class="bg-black/20 p-3 rounded-2xl border border-slate-800/50"><span class="text-[8px] uppercase text-slate-500 block font-black mb-1 tracking-widest">Hosts</span><span class="text-sm font-bold text-blue-400">\${n.scannedDevices.length}</span></div>
-                            <div class="bg-black/20 p-3 rounded-2xl border border-slate-800/50"><span class="text-[8px] uppercase text-slate-500 block font-black mb-1 tracking-widest">Disk</span><span class="text-xs font-bold text-slate-300">\${n.disk ? n.disk.split(' ')[0] : 'N/A'}</span></div>
+                            <div class="bg-black/20 p-3 rounded-2xl border border-slate-800/50"><span class="text-[8px] uppercase text-slate-500 block font-black mb-1 tracking-widest">Hosts</span><span class="text-sm font-bold text-blue-400 font-mono">\${Array.isArray(n.scannedDevices) ? n.scannedDevices.length : 0}</span></div>
+                            <div class="bg-black/20 p-3 rounded-2xl border border-slate-800/50"><span class="text-[8px] uppercase text-slate-500 block font-black mb-1 tracking-widest">Disk</span><span class="text-xs font-bold text-slate-300 font-mono">\${n.disk ? n.disk.split(' ')[0] : 'N/A'}</span></div>
                         </div>
                         <button onclick="launchExplorer('\${n.id}')" class="w-full py-3.5 bg-slate-800 hover:bg-blue-600 text-white rounded-2xl font-bold text-xs transition-all uppercase tracking-tighter">View Network</button>
-                    </div>\`).join("");
+                    </div>\`;
+                }).join("");
             }
 
             function renderExplorer(filter) {
                 const node = currentData.find(n => n.id === activeNodeId);
-                const showOnlyImportant = document.getElementById('showOnlyImportant').checked;
+                const showOnlyImportant = document.getElementById('showOnlyImportant')?.checked;
                 const grid = document.getElementById('explorerContent');
-                if (!node) return;
+                if (!node || !grid) return;
 
                 const devices = (node.scannedDevices || []).filter(c => {
                     const matchesSearch = (c.ip || "").includes(filter) || (c.name || "").toLowerCase().includes(filter);
-                    const matchesImportant = !showOnlyImportant || c.isImportant;
+                    const matchesImportant = !showOnlyImportant || !!c.isImportant;
                     return matchesSearch && matchesImportant;
                 }).sort((a, b) => (b.isImportant ? 1 : 0) - (a.isImportant ? 1 : 0));
 
@@ -351,7 +391,7 @@ function generateUI() {
                         <div class="text-[10px] bg-slate-800 text-slate-400 px-4 py-2 rounded-xl border border-slate-700 font-bold uppercase tracking-widest">Last Sync: \${new Date(node.lastSeen).toLocaleTimeString()}</div>
                     </div>
                     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                        \${devices.map(c => \`
+                        \${devices.length === 0 ? '<div class="col-span-full py-20 text-center text-slate-600 italic">No devices match your criteria.</div>' : devices.map(c => \`
                             <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-lg relative transition-all \${c.isImportant ? 'important-client' : ''}">
                                 <div class="flex justify-between items-start mb-4">
                                     <span class="text-blue-400 font-mono font-bold text-xs font-black">\${c.ip}</span>
@@ -370,8 +410,8 @@ function generateUI() {
                     </div>\`;
             }
 
-            function launchExplorer(id) { activeNodeId = id; document.getElementById("mainView").classList.add("hidden"); document.getElementById("explorerView").classList.remove("hidden"); window.scrollTo(0,0); render(); }
-            function showMain() { activeNodeId = null; document.getElementById("mainView").classList.remove("hidden"); document.getElementById("explorerView").classList.add("hidden"); render(); }
+            function launchExplorer(id) { activeNodeId = id; document.getElementById("mainView")?.classList.add("hidden"); document.getElementById("explorerView")?.classList.remove("hidden"); window.scrollTo(0,0); render(); }
+            function showMain() { activeNodeId = null; document.getElementById("mainView")?.classList.remove("hidden"); document.getElementById("explorerView")?.classList.add("hidden"); render(); }
             
             async function archiveNode(nodeId, archive) {
                 await fetch("/api/archive-node", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ nodeId, archive }) });
@@ -389,8 +429,8 @@ function generateUI() {
                 fetchData();
             }
 
-            document.getElementById("globalFilter").addEventListener("input", render);
-            document.body.addEventListener('change', (e) => { if(e.target.id === 'showOnlyImportant') render(); });
+            document.getElementById("globalFilter")?.addEventListener("input", render);
+            document.getElementById('showOnlyImportant')?.addEventListener('change', render);
             setInterval(fetchData, 5000);
             fetchData();
         </script>
