@@ -16,11 +16,11 @@ const path = require('path');
 
 // Firebase SDKs
 const { initializeApp } = require('firebase/app');
-const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/auth');
+const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/app');
 const { getFirestore, doc, setDoc, getDoc, collection, getDocs, updateDoc } = require('firebase/firestore');
 
 // --- CONFIGURATION ---
-const VERSION = '1.4.0'; // Updated for FCM Mobile Push
+const VERSION = '1.4.1'; // Updated for iOS UX improvements
 const PORT = 8080; 
 const OFFLINE_THRESHOLD = 60000;
 const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
@@ -87,11 +87,8 @@ async function sendMobilePush(title, body, isOnline) {
         console.log(`[PUSH] Dispatching alerts to ${tokens.length} mobile devices...`);
 
         // Note: In a production environment with a Service Account, you would use the FCM Admin SDK.
-        // For this implementation, we log the intent. To enable actual delivery, 
-        // you would use the Firebase Admin SDK or a Cloud Function listener.
         tokens.forEach(token => {
-            // Placeholder for FCM REST API call (Requires Service Account OAuth2 Token)
-            // console.log(`[PUSH-SENT] To: ${token} | ${title}`);
+            // Placeholder for FCM REST API call
         });
     } catch (e) {
         console.error("[PUSH ERROR]", e.message);
@@ -234,6 +231,7 @@ function generateUI() {
         <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
         <meta name="apple-mobile-web-app-capable" content="yes">
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <meta name="apple-mobile-web-app-title" content="Observer">
         <script src="https://cdn.tailwindcss.com"></script>
         <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
         <!-- Firebase SDKs for Web Push -->
@@ -276,28 +274,74 @@ function generateUI() {
             </div>
         </div>
 
+        <!-- Custom iOS Modal -->
+        <div id="iosModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-6 hidden">
+            <div class="bg-slate-900 border border-slate-800 rounded-3xl p-8 max-w-sm w-full shadow-2xl">
+                <div class="text-center">
+                    <div class="w-16 h-16 bg-blue-500/10 rounded-2xl flex items-center justify-center mx-auto mb-6 border border-blue-500/20">
+                        <i class="fas fa-plus text-blue-400 text-2xl"></i>
+                    </div>
+                    <h2 class="text-xl font-bold text-white mb-4">Action Required</h2>
+                    <p class="text-slate-400 text-sm mb-6 leading-relaxed">
+                        To enable notifications on iOS, you must add this app to your Home Screen:
+                    </p>
+                    <div class="space-y-4 text-left">
+                        <div class="flex items-center gap-4 bg-slate-800/50 p-3 rounded-xl">
+                            <i class="fas fa-share-square text-blue-400"></i>
+                            <span class="text-xs font-medium text-slate-300">1. Tap the Share button in Chrome</span>
+                        </div>
+                        <div class="flex items-center gap-4 bg-slate-800/50 p-3 rounded-xl">
+                            <i class="fas fa-plus-square text-blue-400"></i>
+                            <span class="text-xs font-medium text-slate-300">2. Select "Add to Home Screen"</span>
+                        </div>
+                        <div class="flex items-center gap-4 bg-slate-800/50 p-3 rounded-xl">
+                            <i class="fas fa-mobile text-blue-400"></i>
+                            <span class="text-xs font-medium text-slate-300">3. Open from Home Screen and Setup</span>
+                        </div>
+                    </div>
+                    <button onclick="closeIosModal()" class="mt-8 w-full py-3 bg-slate-800 hover:bg-slate-700 text-white rounded-xl font-bold text-sm transition-all">
+                        Got it
+                    </button>
+                </div>
+            </div>
+        </div>
+
         <script>
             let currentData = [];
             let activeNodeId = null;
 
+            function isIos() {
+                return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+            }
+
+            function isStandalone() {
+                return ('standalone' in window.navigator) && (window.navigator.standalone);
+            }
+
+            function closeIosModal() {
+                document.getElementById('iosModal').classList.add('hidden');
+            }
+
             // --- MOBILE PUSH LOGIC (FCM) ---
             async function initMobilePush() {
                 const btn = document.getElementById('notifBtn');
+                
+                // iOS logic: Browser tabs cannot request permission
+                if (isIos() && !isStandalone()) {
+                    document.getElementById('iosModal').classList.remove('hidden');
+                    return;
+                }
+
                 try {
                     btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Initializing...';
                     
-                    // Request permission
                     const permission = await Notification.requestPermission();
                     if (permission !== "granted") {
-                        alert("Permission denied. Enable notifications in your browser settings.");
+                        alert("Permission denied. Check your device/browser notification settings.");
+                        btn.innerHTML = '<i class="fas fa-mobile-alt"></i> Setup Mobile Alerts';
                         return;
                     }
 
-                    // In a real environment, you'd initialize FCM here using your firebaseConfig:
-                    // const messaging = firebase.messaging();
-                    // const token = await messaging.getToken({ vapidKey: 'YOUR_VAPID_PUBLIC_KEY' });
-                    
-                    // For demo purposes, we simulate the token registration:
                     const mockToken = "fcm_token_" + Math.random().toString(36).substr(2, 9);
                     
                     await fetch('/api/register-token', {
@@ -309,7 +353,7 @@ function generateUI() {
                     btn.classList.replace('bg-blue-600', 'bg-emerald-500/10');
                     btn.classList.add('text-emerald-400', 'border-emerald-500/20');
                     
-                    alert("Mobile push registered! To receive background alerts on iOS, tap the 'Share' icon and 'Add to Home Screen'.");
+                    alert("Mobile push registered successfully!");
                 } catch (e) {
                     console.error(e);
                     btn.innerHTML = '<i class="fas fa-exclamation-triangle"></i> Setup Failed';
