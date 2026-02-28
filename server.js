@@ -21,8 +21,32 @@ const PORT = 8080;
 const OFFLINE_THRESHOLD_MS = 60000; 
 const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
 
-// Global Variables provided by the environment
-const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+/**
+ * FIREBASE CONFIGURATION
+ * When running in the Canvas preview, the environment provides the config.
+ * When running on your local Linux server, replace the 'null' below with your 
+ * actual Firebase config object from the Firebase Console.
+ */
+let firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+
+if (!firebaseConfig || !firebaseConfig.apiKey) {
+    // PASTE YOUR FIREBASE CONFIG HERE FOR LOCAL LINUX EXECUTION:
+    firebaseConfig = {
+        apiKey: "YOUR_API_KEY",
+        authDomain: "YOUR_PROJECT.firebaseapp.com",
+        projectId: "YOUR_PROJECT_ID",
+        storageBucket: "YOUR_PROJECT.appspot.com",
+        messagingSenderId: "YOUR_SENDER_ID",
+        appId: "YOUR_APP_ID"
+    };
+    
+    // Log a reminder for the user
+    if (firebaseConfig.apiKey === "YOUR_API_KEY") {
+        console.warn("\n[WARN] Firebase Config is missing or empty.");
+        console.warn("Please edit server.js and paste your Firebase Web App credentials to enable persistence.\n");
+    }
+}
+
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'observer-default';
 const initialToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
@@ -46,7 +70,8 @@ const initAuth = async () => {
             await signInAnonymously(auth);
         }
     } catch (err) {
-        console.error("[AUTH] Initialization failed:", err.message);
+        // If config is still dummy/invalid, this is where it will fail
+        console.error("[AUTH] Initialization failed. Check your Firebase credentials in server.js:", err.message);
     }
 };
 
