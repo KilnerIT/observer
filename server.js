@@ -2,6 +2,7 @@
  * Remote Monitor Server
  * * Features:
  * - REST API for heartbeats & SNMP data.
+ * - Persistent Storage: Saves node data to Firestore.
  * - Auto-sync with GitHub on startup.
  * - Advanced Infrastructure Dashboard.
  */
@@ -10,13 +11,70 @@ const http = require('http');
 const { execSync } = require('child_process');
 const os = require('os');
 
+// Firebase Requirements (Standard Node.js Compatibility)
+const { initializeApp } = require('firebase/app');
+const { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } = require('firebase/auth');
+const { getFirestore, doc, setDoc, collection, getDocs } = require('firebase/firestore');
+
 // --- CONFIGURATION ---
 const PORT = 8080; 
 const OFFLINE_THRESHOLD_MS = 60000; 
 const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
 
-// State: Store client data in memory
+// Global Variables provided by the environment
+const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'observer-default';
+const initialToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+
+// State: Local cache for fast dashboard serving
 const clients = new Map();
+let currentUser = null;
+
+/**
+ * Auth Logic - MANDATORY RULE 3
+ */
+const initAuth = async () => {
+    try {
+        if (initialToken) {
+            await signInWithCustomToken(auth, initialToken);
+        } else {
+            await signInAnonymously(auth);
+        }
+    } catch (err) {
+        console.error("[AUTH] Initialization failed:", err.message);
+    }
+};
+
+onAuthStateChanged(auth, async (user) => {
+    currentUser = user;
+    if (user) {
+        console.log(`[AUTH] Authenticated as ${user.uid}`);
+        await loadPersistedClients(); // Load data from DB once auth is ready
+    }
+});
+
+/**
+ * Load all clients from Firestore on startup
+ */
+async function loadPersistedClients() {
+    if (!currentUser) return;
+    console.log("[DB] Synchronizing state from cloud...");
+    try {
+        // Path: /artifacts/{appId}/public/data/{collectionName} - RULE 1
+        const querySnapshot = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'nodes'));
+        querySnapshot.forEach((doc) => {
+            clients.set(doc.id, doc.data());
+        });
+        console.log(`[DB] Restored ${clients.size} nodes from persistence.`);
+    } catch (err) {
+        console.error("[DB] Failed to load nodes:", err.message);
+    }
+}
 
 /**
  * Synchronizes the Server code with the GitHub repository.
@@ -24,19 +82,15 @@ const clients = new Map();
 function syncWithGithub() {
     console.log(`[GIT] Checking for server updates from ${GITHUB_REPO}...`);
     try {
-        // Check if we are in a git repo
         execSync('git rev-parse --is-inside-work-tree', { stdio: 'ignore' });
-        
         const output = execSync('git pull origin main', { encoding: 'utf8' });
-        
         if (output.includes('Already up to date')) {
             console.log("[GIT] Server code is up to date.");
         } else {
             console.log("[GIT] Server updates downloaded successfully!");
-            console.log("[WARN] Restart the server process to apply changes.");
         }
     } catch (error) {
-        console.log("[GIT] Auto-update skipped (not a git repo or git not installed).");
+        console.log("[GIT] Auto-update skipped (not a git repo).");
     }
 }
 
@@ -53,14 +107,24 @@ const server = http.createServer((req, res) => {
     if (req.url === '/api/heartbeat' && req.method === 'POST') {
         let body = '';
         req.on('data', chunk => { body += chunk.toString(); });
-        req.on('end', () => {
+        req.on('end', async () => {
             try {
                 const data = JSON.parse(body);
-                clients.set(data.id, {
+                const nodeData = {
                     ...data,
                     lastSeen: Date.now(),
                     ip: req.socket.remoteAddress
-                });
+                };
+
+                // Update local memory
+                clients.set(data.id, nodeData);
+
+                // Persist to Firestore - RULE 1
+                if (currentUser) {
+                    const nodeRef = doc(db, 'artifacts', appId, 'public', 'data', 'nodes', data.id);
+                    setDoc(nodeRef, nodeData).catch(err => console.error("[DB] Save failed:", err.message));
+                }
+
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ status: 'ok' }));
             } catch (e) {
@@ -95,7 +159,7 @@ function generateDashboardHTML() {
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Infrastructure Hub</title>
+        <title>Observer Central</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <script src="https://cdn.tailwindcss.com"></script>
         <style>
@@ -111,11 +175,11 @@ function generateDashboardHTML() {
                     <h1 class="text-4xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-emerald-400">
                         Observer Central
                     </h1>
-                    <p class="text-gray-400 mt-1">Infrastructure Monitoring Dashboard</p>
+                    <p class="text-gray-400 mt-1">Infrastructure Persistence Dashboard</p>
                 </div>
                 <div class="flex items-center gap-3 bg-gray-800/50 p-3 rounded-xl border border-gray-700">
-                    <div class="w-2.5 h-2.5 rounded-full bg-green-500 animate-pulse"></div>
-                    <span class="text-xs font-mono text-gray-300">LIVE FEED : PORT ${PORT}</span>
+                    <div class="w-2.5 h-2.5 rounded-full bg-blue-500 animate-pulse"></div>
+                    <span class="text-xs font-mono text-gray-300 tracking-tighter">CLOUD SYNC ACTIVE : PORT ${PORT}</span>
                 </div>
             </header>
 
@@ -159,7 +223,7 @@ function generateDashboardHTML() {
                                             <h3 class="text-2xl font-bold text-white group-hover:text-blue-400 transition-colors">\${node.hostname}</h3>
                                             <div class="flex items-center gap-2 mt-1">
                                                 <span class="text-[10px] bg-gray-800 text-gray-400 px-2 py-0.5 rounded font-mono border border-gray-700">ID: \${node.id}</span>
-                                                <span class="text-[10px] text-gray-500">\${node.os}</span>
+                                                <span class="text-[10px] text-gray-500 font-mono">\${node.os}</span>
                                             </div>
                                         </div>
                                     </div>
@@ -167,21 +231,23 @@ function generateDashboardHTML() {
                                         <div class="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold border \${isOnline ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'bg-red-500/10 text-red-400 border-red-500/30'}">
                                             \${node.status.toUpperCase()}
                                         </div>
-                                        <p class="text-[10px] text-gray-500 mt-2 font-mono">\${Math.floor((Date.now() - node.lastSeen)/1000)}s ago</p>
+                                        <p class="text-[10px] text-gray-500 mt-2 font-mono uppercase tracking-tighter">
+                                            \${isOnline ? 'Last Beat: ' + Math.floor((Date.now() - node.lastSeen)/1000) + 's ago' : 'OFFLINE'}
+                                        </p>
                                     </div>
                                 </div>
 
                                 <div class="grid grid-cols-2 md:grid-cols-3 gap-4 mb-8 text-center">
                                     <div class="bg-black/20 p-4 rounded-2xl border border-gray-800">
-                                        <p class="text-[10px] uppercase text-gray-500 font-bold mb-1">Uptime</p>
+                                        <p class="text-[10px] uppercase text-gray-500 font-bold mb-1 tracking-widest">Uptime</p>
                                         <p class="text-blue-400 font-mono font-bold">\${formatUptime(node.uptime)}</p>
                                     </div>
                                     <div class="bg-black/20 p-4 rounded-2xl border border-gray-800">
-                                        <p class="text-[10px] uppercase text-gray-500 font-bold mb-1">Storage</p>
+                                        <p class="text-[10px] uppercase text-gray-500 font-bold mb-1 tracking-widest">Storage</p>
                                         <p class="text-emerald-400 font-mono font-bold text-sm">\${node.disk}</p>
                                     </div>
                                     <div class="bg-black/20 p-4 rounded-2xl border border-gray-800 col-span-2 md:col-span-1">
-                                        <p class="text-[10px] uppercase text-gray-500 font-bold mb-1">Public IP</p>
+                                        <p class="text-[10px] uppercase text-gray-500 font-bold mb-1 tracking-widest">Public IP</p>
                                         <p class="text-amber-400 font-mono font-bold text-xs truncate">\${node.ip.replace('::ffff:', '')}</p>
                                     </div>
                                 </div>
@@ -202,8 +268,8 @@ function generateDashboardHTML() {
                                                             \${dev.name !== 'Unresponsive' ? 'SNMP' : 'Down'}
                                                         </span>
                                                     </div>
-                                                    <span class="text-[11px] font-medium text-white truncate">\${dev.name}</span>
-                                                    <span class="text-[9px] text-gray-500 italic truncate">\${dev.description}</span>
+                                                    <span class="text-[11px] font-medium text-white truncate text-left">\${dev.name}</span>
+                                                    <span class="text-[9px] text-gray-500 italic truncate text-left">\${dev.description}</span>
                                                 </div>
                                             \`).join('')
                                             : '<div class="text-center py-8 text-gray-600 text-xs italic">Awaiting discovery scan...</div>'
@@ -224,13 +290,13 @@ function generateDashboardHTML() {
     `;
 }
 
-// 1. Initial Update Check
+// Startup Sequence
 syncWithGithub();
+initAuth();
 
-// 2. Start Server
 server.listen(PORT, () => {
     console.log(`\n==========================================`);
-    console.log(` SERVER STARTED ON PORT: ${PORT}`);
+    console.log(` OBSERVER CENTRAL PERSISTENCE ACTIVE`);
     console.log(` DASHBOARD: http://localhost:${PORT}`);
     console.log(`==========================================\n`);
 });
