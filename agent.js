@@ -1,8 +1,8 @@
 /**
- * Observer Node Agent v1.6.0
+ * Observer Node Agent v1.6.1
  * Features:
  * - Automated Nmap Service Discovery (-sV)
- * - Hardware Fingerprinting (Ports, Service versions)
+ * - Robust XML Fingerprinting (Attribute-order independent)
  * - Secure HTTPS communication for Render Cloud
  * - Location Tagging for Node Identification
  * - Support for 'Important' client status tracking
@@ -14,15 +14,14 @@ const { exec, execSync } = require('child_process');
 const crypto = require('crypto');
 
 // --- CONFIGURATION ---
-const VERSION = '1.6.0';
+const VERSION = '1.6.1';
 const SERVER_URL = 'https://observer-sxv0.onrender.com/api/heartbeat';
 const HEARTBEAT_INTERVAL = 30000;   // 30 seconds for health checks
 const SCAN_INTERVAL = 300000;      // 5 minutes for full network scans
 const VERBOSE = true; 
 
 // LOCATION TAG: Set this via environment variable 'OBSERVER_LOCATION'
-// Example: export OBSERVER_LOCATION="London DataCenter"
-const LOCATION = process.env.OBSERVER_LOCATION || 'Remote Site';
+const LOCATION = process.env.OBSERVER_LOCATION || 'Trust HQ';
 
 const clientId = crypto.createHash('md5').update(os.hostname()).digest('hex').substring(0, 8);
 
@@ -85,41 +84,44 @@ function performDiscovery() {
 
         log(`Found ${hosts.length} live hosts. Fingerprinting services...`, "NMAP");
         
-        // Phase 2: Service version detection
+        // Phase 2: Service version detection (limit to top 10 for performance)
         const scanTargets = hosts.slice(0, 10).join(' ');
         exec(`nmap -sV -F --version-light ${scanTargets} -oX -`, (sErr, sStdout) => {
             const results = [];
             
-            try {
-                const hostBlocks = sStdout.split('<host ');
-                hostBlocks.shift(); 
+            if (!sErr && sStdout) {
+                try {
+                    const hostBlocks = sStdout.split('<host ');
+                    hostBlocks.shift(); 
 
-                hostBlocks.forEach(block => {
-                    const ipMatch = block.match(/addr="([0-9.]+)"/);
-                    const serviceMatch = block.match(/service name="([^"]+)" product="([^"]+)"/);
-                    const portMatch = block.match(/portid="([0-9]+)"/);
-                    
-                    if (ipMatch) {
-                        const ip = ipMatch[1];
-                        const name = serviceMatch ? `${serviceMatch[1]} (${serviceMatch[2]})` : "Generic Device";
-                        const desc = portMatch ? `Open Port: ${portMatch[1]}` : "Online (No Open Ports)";
+                    hostBlocks.forEach(block => {
+                        // Extract IP (handling potential MAC addresses in the same block)
+                        const ip = (block.match(/addr="([0-9.]+)" addrtype="ipv4"/) || block.match(/addr="([0-9.]+)"/))?.[1];
+                        if (!ip) return;
+
+                        // Robust individual attribute extraction
+                        const serviceName = block.match(/service name="([^"]+)"/)?.[1] || "unknown";
+                        const product = block.match(/product="([^"]+)"/)?.[1] || "";
+                        const version = block.match(/version="([^"]+)"/)?.[1] || "";
+                        const port = block.match(/portid="([0-9]+)"/)?.[1];
                         
                         results.push({
                             ip: ip,
-                            name: name,
-                            description: desc,
+                            name: product ? `${serviceName} (${product})` : serviceName,
+                            description: (version || port) ? `${version ? 'v'+version : ''} ${port ? 'Port: '+port : ''}`.trim() : "Online",
                             lastSeen: Date.now()
                         });
-                    }
-                });
-            } catch (parseError) {
-                log("Error parsing Nmap XML output", "ERROR");
+                    });
+                } catch (parseError) {
+                    log("Error parsing Nmap XML output: " + parseError.message, "ERROR");
+                }
             }
 
             lastDiscoveryResults = results;
             isScanning = false;
             log(`Discovery complete. reporting ${results.length} fingerprinted devices.`, "OK");
             
+            // Immediate update after scan
             sendHeartbeat();
         });
     });
@@ -137,7 +139,7 @@ function sendHeartbeat() {
         let disk = "N/A";
         try {
             const d = JSON.parse(stdout);
-            disk = `${d.Free || d.FreeGB}GB Free / ${d.Total || d.SizeGB}`;
+            disk = `${d.Free || d.FreeGB || '0'}GB Free / ${d.Total || d.SizeGB || '0'}GB`;
         } catch(e) {}
 
         const payload = JSON.stringify({
@@ -148,19 +150,22 @@ function sendHeartbeat() {
             os: os.type() + ' ' + os.release(),
             uptime: os.uptime(),
             disk: disk,
-            scannedDevices: lastDiscoveryResults,
+            scannedDevices: Array.isArray(lastDiscoveryResults) ? lastDiscoveryResults : [],
             timestamp: Date.now()
         });
 
+        // Convert to Buffer for accurate byte length calculation and transmission
+        const body = Buffer.from(payload, 'utf8');
         const url = new URL(SERVER_URL);
+        
         const options = {
             hostname: url.hostname,
             port: 443,
             path: url.pathname,
             method: 'POST',
             headers: { 
-                'Content-Type': 'application/json', 
-                'Content-Length': Buffer.byteLength(payload) 
+                'Content-Type': 'application/json; charset=utf-8', 
+                'Content-Length': body.length 
             }
         };
 
@@ -173,7 +178,7 @@ function sendHeartbeat() {
         });
 
         req.on('error', (e) => log(`Connection failed: ${e.message}`, "ERROR"));
-        req.write(payload);
+        req.write(body);
         req.end();
     });
 }
