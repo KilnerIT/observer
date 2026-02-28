@@ -28,7 +28,7 @@ const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 
 // VAPID Public Key (REQUIRED: Get this from Firebase Console > Project Settings > Cloud Messaging)
-const VAPID_PUBLIC_KEY = 'REPLACE_WITH_YOUR_ACTUAL_FIREBASE_PUBLIC_VAPID_KEY';
+const VAPID_PUBLIC_KEY = 'BPwyA18Ohqzc6VRdDzaOYvxJc699wrIiFBfbPvfQEHsuIo2L0Zx38PODwoI8inAhukQPZdZN_En3N8ZWULVZwe4';
 
 let firebaseConfig = null;
 if (fs.existsSync(CONFIG_PATH)) {
