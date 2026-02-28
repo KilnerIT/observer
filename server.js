@@ -1,6 +1,7 @@
 /**
- * Observer Central - Enterprise Infrastructure Hub v1.8.0
+ * Observer Central - Enterprise Infrastructure Hub v1.8.1
  * Features:
+ * - Bugfix: Corrected Firebase Auth imports to resolve 'getAuth' crash
  * - High-Density List View: Optimized for large fleets with reduced whitespace
  * - Global Stats Bar: Total Nodes, Total Clients, and Priority Asset counts
  * - Prominent Left-Aligned Status: Instant visibility of node health
@@ -15,11 +16,11 @@ const path = require('path');
 
 // Firebase SDKs
 const { initializeApp } = require('firebase/app');
-const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/app');
+const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/auth');
 const { getFirestore, doc, setDoc, getDoc, collection, getDocs, updateDoc } = require('firebase/firestore');
 
 // --- CONFIGURATION ---
-const VERSION = '1.8.0'; 
+const VERSION = '1.8.1'; 
 const PORT = process.env.PORT || 8080; 
 const OFFLINE_THRESHOLD = 60000;
 const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
@@ -128,7 +129,7 @@ const server = http.createServer(async (req, res) => {
         req.on('end', async () => {
             const data = JSON.parse(body);
             settings = { ...settings, ...data };
-            if (currentUser) setDoc(doc(db, 'artifacts', appId, 'public', 'settings', 'config'), settings);
+            if (currentUser) setDoc(doc(db, 'artifacts', appId, 'public', settings, 'config'), settings);
             res.writeHead(200); res.end(JSON.stringify({ status: 'updated' }));
         });
     }
