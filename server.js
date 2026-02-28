@@ -1,12 +1,11 @@
 /**
- * Observer Central - Enterprise Infrastructure Hub v1.6.1
+ * Observer Central - Enterprise Infrastructure Hub v1.7.0
  * Features:
- * - Archive Node Functionality (Hides nodes without deleting)
- * - Important Client Tagging (Star/Highlight high-priority endpoints)
- * - Location Tagging Support
- * - iOS PWA Hardening
- * - Firebase Persistent Storage
- * - Bugfix: Robust merging logic to prevent HTTP 400 errors
+ * - Refined Professional UI: Slate Grey, White, and Blue palette
+ * - Priority Device Monitor: Live list of important endpoints on Node cards
+ * - System Config: Customizable branding (Logo, Title) via UI
+ * - Navigation: Compact icon-based explorer access
+ * - Firebase Persistent Settings
  */
 
 const http = require('http');
@@ -20,7 +19,7 @@ const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/aut
 const { getFirestore, doc, setDoc, getDoc, collection, getDocs, updateDoc } = require('firebase/firestore');
 
 // --- CONFIGURATION ---
-const VERSION = '1.6.1'; 
+const VERSION = '1.7.0'; 
 const PORT = process.env.PORT || 8080; 
 const OFFLINE_THRESHOLD = 60000;
 const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
@@ -49,6 +48,7 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 
 const nodes = new Map();
+let settings = { siteTitle: "OBSERVER HUB", logoUrl: "https://cdn-icons-png.flaticon.com/512/564/564348.png" };
 let currentUser = null;
 
 // Auth & Data Recovery
@@ -58,8 +58,13 @@ onAuthStateChanged(auth, async (user) => {
     if (user) {
         console.log(`[SYSTEM] Authenticated. Loading persistence for ${appId}...`);
         try {
+            // Load Nodes
             const snapshot = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'nodes'));
             snapshot.forEach(d => nodes.set(d.id, d.data()));
+            
+            // Load Settings
+            const setDocRef = await getDoc(doc(db, 'artifacts', appId, 'public', 'settings', 'config'));
+            if (setDocRef.exists()) settings = { ...settings, ...setDocRef.data() };
         } catch(e) { console.error("Recovery failed:", e.message); }
     }
 });
@@ -76,9 +81,9 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/manifest.json') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({
-            name: "Observer Central", short_name: "Observer", start_url: "/", display: "standalone",
-            background_color: "#0b0f1a", theme_color: "#0b0f1a",
-            icons: [{ src: "https://cdn-icons-png.flaticon.com/512/564/564348.png", sizes: "512x512", type: "image/png" }]
+            name: settings.siteTitle, short_name: "Observer", start_url: "/", display: "standalone",
+            background_color: "#0f172a", theme_color: "#3b82f6",
+            icons: [{ src: settings.logoUrl, sizes: "512x512", type: "image/png" }]
         }));
     }
 
@@ -87,11 +92,11 @@ const server = http.createServer(async (req, res) => {
         return res.end(`self.addEventListener('push', e => {
             let d = { title: "Observer Alert", body: "Change detected" };
             try { d = e.data.json(); } catch(err) {}
-            e.waitUntil(self.registration.showNotification(d.title, { body: d.body, icon: "https://cdn-icons-png.flaticon.com/512/564/564348.png" }));
+            e.waitUntil(self.registration.showNotification(d.title, { body: d.body, icon: "${settings.logoUrl}" }));
         });`);
     }
 
-    // API: Heartbeat (Fixed Merge Logic)
+    // API: Heartbeat
     if (url.pathname === '/api/heartbeat' && req.method === 'POST') {
         let body = '';
         req.on('data', chunk => body += chunk);
@@ -99,12 +104,7 @@ const server = http.createServer(async (req, res) => {
             try {
                 const data = JSON.parse(body);
                 if (!data.id) throw new Error("Missing ID");
-
                 const existing = nodes.get(data.id) || { scannedDevices: [], isArchived: false };
-                
-                // Reset archive status if node reports in
-                const isArchived = existing.isArchived || false;
-
                 const currentScans = Array.isArray(data.scannedDevices) ? data.scannedDevices : [];
                 const mergedDevices = Array.isArray(existing.scannedDevices) ? [...existing.scannedDevices] : [];
 
@@ -112,38 +112,30 @@ const server = http.createServer(async (req, res) => {
                     if (!newDev || !newDev.ip) return;
                     const idx = mergedDevices.findIndex(d => d && d.ip === newDev.ip);
                     if (idx > -1) { 
-                        // Safe merge: preserve 'isImportant' and 'firstSeen'
                         const oldDev = mergedDevices[idx];
-                        mergedDevices[idx] = { 
-                            ...newDev, 
-                            isImportant: !!oldDev.isImportant, 
-                            firstSeen: oldDev.firstSeen || Date.now(),
-                            lastSeen: Date.now() 
-                        }; 
+                        mergedDevices[idx] = { ...newDev, isImportant: !!oldDev.isImportant, firstSeen: oldDev.firstSeen || Date.now(), lastSeen: Date.now() }; 
                     } else { 
                         mergedDevices.push({ ...newDev, isImportant: false, firstSeen: Date.now(), lastSeen: Date.now() }); 
                     }
                 });
 
-                const nodeUpdate = { 
-                    ...existing, 
-                    ...data, 
-                    isArchived: false, // Unarchive on heartbeat
-                    scannedDevices: mergedDevices, 
-                    lastSeen: Date.now(), 
-                    ip: req.socket.remoteAddress.replace('::ffff:', '') 
-                };
-
+                const nodeUpdate = { ...existing, ...data, isArchived: false, scannedDevices: mergedDevices, lastSeen: Date.now(), ip: req.socket.remoteAddress.replace('::ffff:', '') };
                 nodes.set(data.id, nodeUpdate);
                 if (currentUser) setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'nodes', data.id), nodeUpdate);
-                
-                res.writeHead(200); 
-                res.end(JSON.stringify({ status: 'ok' }));
-            } catch (e) { 
-                console.error("[API ERROR]", e.message); 
-                res.writeHead(400); 
-                res.end('Error'); 
-            }
+                res.writeHead(200); res.end(JSON.stringify({ status: 'ok' }));
+            } catch (e) { res.writeHead(400); res.end('Error'); }
+        });
+    }
+
+    // API: Update Settings
+    else if (url.pathname === '/api/update-settings' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', async () => {
+            const data = JSON.parse(body);
+            settings = { ...settings, ...data };
+            if (currentUser) setDoc(doc(db, 'artifacts', appId, 'public', 'settings', 'config'), settings);
+            res.writeHead(200); res.end(JSON.stringify({ status: 'updated' }));
         });
     }
 
@@ -152,16 +144,14 @@ const server = http.createServer(async (req, res) => {
         let body = '';
         req.on('data', chunk => body += chunk);
         req.on('end', async () => {
-            try {
-                const { nodeId, archive } = JSON.parse(body);
-                const node = nodes.get(nodeId);
-                if (node) {
-                    node.isArchived = !!archive;
-                    nodes.set(nodeId, node);
-                    if (currentUser) updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'nodes', nodeId), { isArchived: !!archive });
-                }
-                res.writeHead(200); res.end(JSON.stringify({ status: 'updated' }));
-            } catch(e) { res.writeHead(400); res.end('Fail'); }
+            const { nodeId, archive } = JSON.parse(body);
+            const node = nodes.get(nodeId);
+            if (node) {
+                node.isArchived = !!archive;
+                nodes.set(nodeId, node);
+                if (currentUser) updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'nodes', nodeId), { isArchived: !!archive });
+            }
+            res.writeHead(200); res.end(JSON.stringify({ status: 'updated' }));
         });
     }
 
@@ -170,37 +160,16 @@ const server = http.createServer(async (req, res) => {
         let body = '';
         req.on('data', chunk => body += chunk);
         req.on('end', async () => {
-            try {
-                const { nodeId, clientIp } = JSON.parse(body);
-                const node = nodes.get(nodeId);
-                if (node) {
-                    const device = node.scannedDevices.find(d => d.ip === clientIp);
-                    if (device) {
-                        device.isImportant = !device.isImportant;
-                        nodes.set(nodeId, node);
-                        if (currentUser) updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'nodes', nodeId), { scannedDevices: node.scannedDevices });
-                    }
-                }
-                res.writeHead(200); res.end(JSON.stringify({ status: 'updated' }));
-            } catch(e) { res.writeHead(400); res.end('Fail'); }
-        });
-    }
-
-    // API: Delete Client
-    else if (url.pathname === '/api/delete-client' && req.method === 'POST') {
-        let body = '';
-        req.on('data', chunk => body += chunk);
-        req.on('end', async () => {
-            try {
-                const { nodeId, clientIp } = JSON.parse(body);
-                const node = nodes.get(nodeId);
-                if (node) {
-                    node.scannedDevices = node.scannedDevices.filter(d => d.ip !== clientIp);
-                    nodes.set(nodeId, node);
+            const { nodeId, clientIp } = JSON.parse(body);
+            const node = nodes.get(nodeId);
+            if (node) {
+                const device = node.scannedDevices.find(d => d.ip === clientIp);
+                if (device) {
+                    device.isImportant = !device.isImportant;
                     if (currentUser) updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'nodes', nodeId), { scannedDevices: node.scannedDevices });
                 }
-                res.writeHead(200); res.end(JSON.stringify({ status: 'deleted' }));
-            } catch(e) { res.writeHead(400); res.end('Fail'); }
+            }
+            res.writeHead(200); res.end(JSON.stringify({ status: 'updated' }));
         });
     }
 
@@ -210,7 +179,7 @@ const server = http.createServer(async (req, res) => {
             ...n, isOnline: (Date.now() - (n.lastSeen || 0)) < OFFLINE_THRESHOLD
         }));
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(list));
+        res.end(JSON.stringify({ nodes: list, settings }));
     }
 
     // Dashboard UI
@@ -225,7 +194,7 @@ function generateUI() {
     <!DOCTYPE html>
     <html class="dark">
     <head>
-        <title>Observer Hub v${VERSION}</title>
+        <title>Observer Hub</title>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
         <meta name="mobile-web-app-capable" content="yes">
@@ -234,98 +203,131 @@ function generateUI() {
         <script src="https://cdn.tailwindcss.com"></script>
         <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
         <style>
-            .important-client { border-color: #fbbf24 !important; background: rgba(251, 191, 36, 0.05); }
-            .important-tag { color: #fbbf24; }
+            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap');
+            body { font-family: 'Inter', sans-serif; background-color: #0f172a; }
+            .node-card { background: #1e293b; border: 1px solid #334155; }
+            .priority-item { border-left: 2px solid #3b82f6; }
+            .important-glow { border-color: #fbbf24 !important; box-shadow: 0 0 15px rgba(251, 191, 36, 0.1); }
         </style>
     </head>
-    <body class="bg-[#0b0f1a] text-slate-200 min-h-screen font-sans">
-        <div id="app" class="p-4 md:p-6 max-w-7xl mx-auto">
-            <header class="flex flex-col lg:flex-row justify-between items-start lg:items-center mb-10 gap-4">
-                <div>
-                    <h1 class="text-3xl font-black text-white flex items-center gap-3">
-                        <i class="fas fa-eye text-blue-500"></i> OBSERVER <span class="text-blue-500">HUB</span>
-                    </h1>
-                    <div class="flex items-center gap-3 mt-1">
-                        <p class="text-slate-500 text-xs font-bold uppercase tracking-widest">Global Fleet Monitor</p>
-                        <span class="text-[9px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded font-bold border border-slate-700 uppercase">v${VERSION}</span>
+    <body class="text-slate-200 min-h-screen antialiased">
+        <div id="app" class="p-4 md:p-8 max-w-7xl mx-auto">
+            <header class="flex flex-col lg:flex-row justify-between items-start lg:items-center mb-12 gap-6">
+                <div class="flex items-center gap-5">
+                    <img id="headerLogo" src="" class="w-12 h-12 object-contain" alt="Logo">
+                    <div>
+                        <h1 id="headerTitle" class="text-3xl font-black text-white tracking-tighter uppercase"></h1>
+                        <p class="text-slate-500 text-[10px] font-bold uppercase tracking-[0.2em]">Infrastructure Intelligence</p>
                     </div>
                 </div>
                 <div class="flex flex-wrap items-center gap-3 w-full lg:w-auto">
+                    <button onclick="toggleView('config')" class="p-2.5 bg-slate-800 hover:bg-slate-700 text-slate-400 rounded-xl border border-slate-700 transition-all">
+                        <i class="fas fa-cog"></i>
+                    </button>
                     <button id="viewArchiveBtn" onclick="toggleArchiveView()" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-bold transition-all border border-slate-700">
-                        <i class="fas fa-archive mr-2"></i> Show Archives
+                        <i class="fas fa-archive mr-2"></i> Archives
                     </button>
-                    <button id="notifBtn" onclick="initPush()" class="px-4 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-blue-500/20">
-                        <i class="fas fa-bell mr-2"></i> Setup Alerts
+                    <button onclick="initPush()" class="px-4 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold shadow-lg shadow-blue-500/20">
+                        <i class="fas fa-bell mr-2"></i> Alerts
                     </button>
-                    <input type="text" id="globalFilter" placeholder="Search..." class="bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 min-w-[150px]">
+                    <input type="text" id="globalFilter" placeholder="Global Search..." class="bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 min-w-[180px]">
                 </div>
             </header>
 
-            <div id="mainView">
-                <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6" id="nodeGrid"></div>
+            <!-- Views -->
+            <div id="mainView" class="view-section">
+                <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-8" id="nodeGrid"></div>
             </div>
 
-            <div id="explorerView" class="hidden">
-                <div class="flex justify-between items-center mb-8">
-                    <button onclick="showMain()" class="flex items-center gap-2 text-slate-400 hover:text-white transition-colors font-bold text-sm uppercase">
-                        <i class="fas fa-chevron-left text-xs"></i> BACK TO FLEET
+            <div id="explorerView" class="view-section hidden">
+                <div class="flex justify-between items-center mb-8 bg-slate-800/50 p-4 rounded-2xl border border-slate-800">
+                    <button onclick="toggleView('main')" class="flex items-center gap-2 text-slate-400 hover:text-white transition-colors font-bold text-xs uppercase tracking-widest">
+                        <i class="fas fa-chevron-left text-[10px]"></i> Fleet Overview
                     </button>
-                    <div class="flex items-center gap-4">
-                        <label class="flex items-center gap-2 text-xs font-bold text-slate-500 cursor-pointer">
-                            <input type="checkbox" id="showOnlyImportant" class="rounded border-slate-800 bg-slate-900 text-amber-500 focus:ring-amber-500">
-                            IMPORTANT ONLY
-                        </label>
-                    </div>
+                    <label class="flex items-center gap-2 text-[10px] font-black text-slate-500 cursor-pointer uppercase tracking-widest">
+                        <input type="checkbox" id="showOnlyImportant" class="rounded border-slate-800 bg-slate-900 text-amber-500 focus:ring-amber-500">
+                        Priority Only
+                    </label>
                 </div>
                 <div id="explorerContent"></div>
             </div>
-        </div>
 
-        <div id="iosModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-6 hidden">
-            <div class="bg-slate-900 border border-slate-800 rounded-3xl p-8 max-w-sm w-full text-center">
-                <i class="fas fa-mobile-alt text-blue-500 text-3xl mb-4"></i>
-                <h2 class="text-xl font-bold text-white mb-2">Setup Required</h2>
-                <p class="text-slate-400 text-sm mb-6">On iOS, tap 'Share' then 'Add to Home Screen' to enable push alerts.</p>
-                <button onclick="document.getElementById('iosModal').classList.add('hidden')" class="w-full py-3 bg-slate-800 text-white rounded-xl font-bold text-sm">Got it</button>
+            <div id="configView" class="view-section hidden">
+                <button onclick="toggleView('main')" class="mb-8 text-slate-400 hover:text-white font-bold text-xs uppercase tracking-widest">
+                    <i class="fas fa-arrow-left mr-2"></i> Back
+                </button>
+                <div class="max-w-2xl bg-slate-800 border border-slate-700 rounded-3xl p-8 shadow-2xl">
+                    <h2 class="text-2xl font-black text-white mb-8">SYSTEM CONFIGURATION</h2>
+                    <div class="space-y-6">
+                        <div>
+                            <label class="block text-[10px] font-black text-slate-500 uppercase mb-2">Company Name / Hub Title</label>
+                            <input type="text" id="cfgTitle" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-sm text-white focus:ring-2 focus:ring-blue-500">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] font-black text-slate-500 uppercase mb-2">Logo URL (PNG/SVG Preferred)</label>
+                            <input type="text" id="cfgLogo" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-sm text-white focus:ring-2 focus:ring-blue-500">
+                        </div>
+                        <button onclick="saveConfig()" class="w-full py-4 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold transition-all shadow-xl shadow-blue-500/20 uppercase tracking-widest text-xs mt-4">
+                            Apply Changes
+                        </button>
+                    </div>
+                </div>
             </div>
         </div>
 
         <script>
             let currentData = [];
+            let currentSettings = {};
             let activeNodeId = null;
             let showArchived = false;
             const VAPID_KEY = "${VAPID_PUBLIC_KEY}";
 
+            function urlBase64ToUint8Array(s) { const p = '='.repeat((4-s.length%4)%4); const b = (s+p).replace(/-/g,'+').replace(/_/g,'/'); const r = window.atob(b); const o = new Uint8Array(r.length); for(let i=0; i<r.length; ++i){ o[i]=r.charCodeAt(i); } return o; }
+            if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
+
             async function initPush() {
-                if (/iPad|iPhone|iPod/.test(navigator.userAgent) && !window.navigator.standalone) {
-                    document.getElementById('iosModal').classList.remove('hidden');
-                    return;
-                }
-                const btn = document.getElementById('notifBtn');
                 try {
-                    btn.innerHTML = "Initializing...";
                     const reg = await navigator.serviceWorker.ready;
                     const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(VAPID_KEY) });
                     await fetch('/api/register-token', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ subscription: sub }) });
-                    btn.innerHTML = "Alerts Active";
-                    btn.classList.add('bg-emerald-500/10', 'text-emerald-500', 'border-emerald-500/20');
-                } catch (e) { btn.innerHTML = "Setup Failed"; console.error(e); }
+                    alert("Alerts Enabled.");
+                } catch (e) { console.error(e); }
             }
-
-            function urlBase64ToUint8Array(s) { const p = '='.repeat((4-s.length%4)%4); const b = (s+p).replace(/-/g,'+').replace(/_/g,'/'); const r = window.atob(b); const o = new Uint8Array(r.length); for(let i=0; i<r.length; ++i){ o[i]=r.charCodeAt(i); } return o; }
-            if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
 
             async function fetchData() {
                 try {
                     const res = await fetch('/api/status');
-                    currentData = await res.json();
+                    const json = await res.json();
+                    currentData = json.nodes;
+                    currentSettings = json.settings;
+                    updateBranding();
                     render();
                 } catch (e) {}
             }
 
+            function updateBranding() {
+                document.getElementById('headerTitle').innerText = currentSettings.siteTitle;
+                document.getElementById('headerLogo').src = currentSettings.logoUrl;
+                document.getElementById('cfgTitle').value = currentSettings.siteTitle;
+                document.getElementById('cfgLogo').value = currentSettings.logoUrl;
+            }
+
+            async function saveConfig() {
+                const data = { siteTitle: document.getElementById('cfgTitle').value, logoUrl: document.getElementById('cfgLogo').value };
+                await fetch('/api/update-settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
+                fetchData();
+                toggleView('main');
+            }
+
+            function toggleView(view) {
+                document.querySelectorAll('.view-section').forEach(s => s.classList.add('hidden'));
+                document.getElementById(view + 'View').classList.remove('hidden');
+                activeNodeId = (view === 'main' || view === 'config') ? null : activeNodeId;
+            }
+
             function toggleArchiveView() {
                 showArchived = !showArchived;
-                document.getElementById('viewArchiveBtn').innerHTML = showArchived ? '<i class="fas fa-eye mr-2"></i> Show Active' : '<i class="fas fa-archive mr-2"></i> Show Archives';
+                document.getElementById('viewArchiveBtn').classList.toggle('bg-blue-500/10');
                 render();
             }
 
@@ -337,35 +339,58 @@ function generateUI() {
 
             function renderGrid(filter) {
                 const grid = document.getElementById('nodeGrid');
-                if(!grid) return;
-                const filtered = currentData.filter(n => {
-                    const matchesSearch = (n.hostname || "").toLowerCase().includes(filter) || (n.id || "").toLowerCase().includes(filter);
-                    return matchesSearch && (!!n.isArchived === showArchived);
+                const nodes = currentData.filter(n => {
+                    const match = (n.hostname || "").toLowerCase().includes(filter) || (n.location || "").toLowerCase().includes(filter);
+                    return match && (!!n.isArchived === showArchived);
                 });
 
-                if (filtered.length === 0) {
-                    grid.innerHTML = \`<div class="col-span-full py-20 text-center text-slate-600 italic border-2 border-dashed border-slate-800/50 rounded-3xl">No \${showArchived ? 'archived' : 'active'} nodes found.</div>\`;
-                    return;
-                }
-
-                grid.innerHTML = filtered.map(n => {
+                grid.innerHTML = nodes.map(n => {
                     const statusClass = n.isOnline ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 'bg-red-500/10 text-red-400 border-red-500/20';
+                    const importantDevices = (n.scannedDevices || []).filter(d => d.isImportant).slice(0, 3);
+                    
                     return \`
-                    <div class="bg-slate-900/50 border border-slate-800 rounded-3xl p-6 transition-all group relative hover:border-blue-500/50">
-                        <div class="flex justify-between items-start mb-6">
-                            <div class="p-3 bg-blue-500/10 rounded-2xl"><i class="fas fa-server text-blue-400"></i></div>
-                            <div class="flex items-center gap-2">
-                                <button onclick="archiveNode('\${n.id}', \${!n.isArchived})" class="p-2 text-slate-600 hover:text-white transition-colors" title="Archive Node"><i class="fas fa-archive text-[10px]"></i></button>
-                                <span class="px-2 py-1 rounded-lg text-[9px] font-black uppercase \${statusClass}">\${n.isOnline ? 'Online' : 'Offline'}</span>
+                    <div class="node-card rounded-[2.5rem] p-8 transition-all group relative overflow-hidden shadow-2xl">
+                        <div class="flex justify-between items-start mb-8">
+                            <div class="p-4 bg-blue-500/10 rounded-2xl border border-blue-500/20 shadow-inner">
+                                <i class="fas fa-broadcast-tower text-blue-400 text-2xl"></i>
+                            </div>
+                            <div class="flex items-center gap-3">
+                                <button onclick="archiveNode('\${n.id}', \${!n.isArchived})" class="p-2 text-slate-600 hover:text-white transition-colors"><i class="fas fa-archive text-xs"></i></button>
+                                <span class="px-3 py-1.5 rounded-xl text-[9px] font-black uppercase \${statusClass}">\${n.isOnline ? 'Online' : 'Offline'}</span>
+                                <button onclick="launchExplorer('\${n.id}')" class="p-2.5 bg-slate-800 text-blue-400 rounded-xl hover:bg-blue-500 hover:text-white transition-all">
+                                    <i class="fas fa-search-plus"></i>
+                                </button>
                             </div>
                         </div>
-                        <h3 class="text-xl font-bold text-white mb-0.5 truncate uppercase tracking-tighter font-black">\${n.hostname}</h3>
-                        <p class="text-[10px] text-slate-500 font-mono mb-4 uppercase tracking-widest opacity-60">\${n.location || 'Unknown Location'}</p>
-                        <div class="grid grid-cols-2 gap-3 mb-6">
-                            <div class="bg-black/20 p-3 rounded-2xl border border-slate-800/50"><span class="text-[8px] uppercase text-slate-500 block font-black mb-1 tracking-widest">Hosts</span><span class="text-sm font-bold text-blue-400 font-mono">\${Array.isArray(n.scannedDevices) ? n.scannedDevices.length : 0}</span></div>
-                            <div class="bg-black/20 p-3 rounded-2xl border border-slate-800/50"><span class="text-[8px] uppercase text-slate-500 block font-black mb-1 tracking-widest">Disk</span><span class="text-xs font-bold text-slate-300 font-mono">\${n.disk ? n.disk.split(' ')[0] : 'N/A'}</span></div>
+
+                        <h3 class="text-3xl font-black text-white mb-1 uppercase tracking-tighter">\${n.hostname}</h3>
+                        <p class="text-xs text-slate-500 font-bold uppercase tracking-widest mb-8 opacity-80">\${n.location || 'Remote Site'}</p>
+
+                        <div class="grid grid-cols-2 gap-4 mb-8">
+                            <div class="bg-black/20 p-4 rounded-2xl border border-slate-700/50">
+                                <span class="text-[9px] font-black text-slate-500 block mb-1 tracking-widest">FLEET COUNT</span>
+                                <span class="text-3xl font-black text-blue-400">\${n.scannedDevices.length}</span>
+                            </div>
+                            <div class="bg-black/20 p-4 rounded-2xl border border-slate-700/50">
+                                <span class="text-[9px] font-black text-slate-500 block mb-1 tracking-widest">DISK LOAD</span>
+                                <span class="text-lg font-black text-slate-300">\${n.disk ? n.disk.split(' ')[0] : 'N/A'}</span>
+                            </div>
                         </div>
-                        <button onclick="launchExplorer('\${n.id}')" class="w-full py-3.5 bg-slate-800 hover:bg-blue-600 text-white rounded-2xl font-bold text-xs transition-all uppercase tracking-tighter">View Network</button>
+
+                        <div class="space-y-3">
+                            <span class="text-[9px] font-black text-slate-500 block mb-2 tracking-widest uppercase">Priority Assets</span>
+                            \${importantDevices.length === 0 ? '<p class="text-[10px] text-slate-600 italic">No assets marked for priority</p>' : importantDevices.map(d => \`
+                                <div class="priority-item bg-slate-800/80 p-3 rounded-xl flex justify-between items-center">
+                                    <div>
+                                        <p class="text-[11px] font-black text-white">\${d.name || d.ip}</p>
+                                        <p class="text-[9px] text-slate-500 font-mono">\${d.ip}</p>
+                                    </div>
+                                    <div class="text-right">
+                                        <p class="text-[8px] font-black text-blue-500 uppercase">\${new Date(d.lastSeen).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</p>
+                                    </div>
+                                </div>
+                            \`).join('')}
+                        </div>
                     </div>\`;
                 }).join("");
             }
@@ -377,58 +402,43 @@ function generateUI() {
                 if (!node || !grid) return;
 
                 const devices = (node.scannedDevices || []).filter(c => {
-                    const matchesSearch = (c.ip || "").includes(filter) || (c.name || "").toLowerCase().includes(filter);
-                    const matchesImportant = !showOnlyImportant || !!c.isImportant;
-                    return matchesSearch && matchesImportant;
-                }).sort((a, b) => (b.isImportant ? 1 : 0) - (a.isImportant ? 1 : 0));
+                    const match = (c.ip || "").includes(filter) || (c.name || "").toLowerCase().includes(filter);
+                    return match && (!showOnlyImportant || !!c.isImportant);
+                }).sort((a,b) => (b.isImportant?1:0) - (a.isImportant?1:0));
 
                 grid.innerHTML = \`
-                    <div class="bg-slate-900/50 border border-slate-800 rounded-3xl p-6 md:p-10 mb-8 flex justify-between items-center">
+                    <div class="bg-slate-800 border border-slate-700 rounded-3xl p-10 mb-8 flex justify-between items-center shadow-inner">
                         <div>
-                            <h2 class="text-3xl font-black text-white uppercase tracking-tighter mb-1">\${node.hostname}</h2>
-                            <p class="text-slate-500 text-xs font-bold uppercase tracking-widest">\${node.location} // Inventory Discovery</p>
+                            <h2 class="text-4xl font-black text-white uppercase tracking-tighter mb-1">\${node.hostname}</h2>
+                            <p class="text-blue-500 text-xs font-black uppercase tracking-[0.3em]">\${node.location} Discovery</p>
                         </div>
-                        <div class="text-[10px] bg-slate-800 text-slate-400 px-4 py-2 rounded-xl border border-slate-700 font-bold uppercase tracking-widest">Last Sync: \${new Date(node.lastSeen).toLocaleTimeString()}</div>
+                        <div class="text-[10px] bg-slate-900 text-slate-400 px-5 py-3 rounded-xl border border-slate-800 font-bold uppercase tracking-widest">Sync: \${new Date(node.lastSeen).toLocaleTimeString()}</div>
                     </div>
                     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                        \${devices.length === 0 ? '<div class="col-span-full py-20 text-center text-slate-600 italic">No devices match your criteria.</div>' : devices.map(c => \`
-                            <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-lg relative transition-all \${c.isImportant ? 'important-client' : ''}">
-                                <div class="flex justify-between items-start mb-4">
-                                    <span class="text-blue-400 font-mono font-bold text-xs font-black">\${c.ip}</span>
+                        \${devices.map(c => \`
+                            <div class="bg-slate-800/80 border border-slate-700 p-6 rounded-[1.5rem] shadow-xl relative \${c.isImportant ? 'important-glow' : ''}">
+                                <div class="flex justify-between items-start mb-5">
+                                    <span class="text-blue-400 font-mono font-black text-xs">\${c.ip}</span>
                                     <div class="flex gap-1">
                                         <button onclick="toggleImportant('\${node.id}', '\${c.ip}')" class="p-1.5 \${c.isImportant ? 'text-amber-400' : 'text-slate-600 hover:text-white'} transition-colors"><i class="fas fa-star text-xs"></i></button>
                                         <button onclick="deleteClient('\${node.id}', '\${c.ip}')" class="p-1.5 text-slate-600 hover:text-red-500 transition-colors"><i class="fas fa-trash-alt text-xs"></i></button>
                                     </div>
                                 </div>
-                                <h4 class="text-white font-bold mb-1 truncate text-base uppercase tracking-tight font-black">\${c.name}</h4>
+                                <h4 class="text-white font-black mb-1 truncate text-base uppercase tracking-tight">\${c.name}</h4>
                                 <p class="text-[10px] text-slate-500 mb-6 truncate font-bold uppercase tracking-widest opacity-60">\${c.description}</p>
-                                <div class="flex justify-between items-center text-[9px] font-black text-slate-600 uppercase pt-4 border-t border-slate-800/50">
+                                <div class="flex justify-between items-center text-[9px] font-black text-slate-600 uppercase pt-4 border-t border-slate-700/50">
                                     <span>Sync: \${new Date(c.lastSeen).toLocaleTimeString()}</span>
-                                    \${c.isImportant ? '<span class="important-tag font-black tracking-widest uppercase">PRIORITY</span>' : '<span class="text-slate-700 font-black tracking-widest uppercase">NORMAL</span>'}
+                                    \${c.isImportant ? '<span class="text-amber-500 tracking-widest font-black">PRIORITY</span>' : '<span class="tracking-widest">GENERIC</span>'}
                                 </div>
                             </div>\`).join("")}
                     </div>\`;
             }
 
-            function launchExplorer(id) { activeNodeId = id; document.getElementById("mainView")?.classList.add("hidden"); document.getElementById("explorerView")?.classList.remove("hidden"); window.scrollTo(0,0); render(); }
-            function showMain() { activeNodeId = null; document.getElementById("mainView")?.classList.remove("hidden"); document.getElementById("explorerView")?.classList.add("hidden"); render(); }
+            function launchExplorer(id) { activeNodeId = id; toggleView('explorer'); render(); }
+            async function archiveNode(nodeId, archive) { await fetch("/api/archive-node", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ nodeId, archive }) }); fetchData(); }
+            async function toggleImportant(nodeId, clientIp) { await fetch("/api/toggle-important", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ nodeId, clientIp }) }); fetchData(); }
+            async function deleteClient(nodeId, clientIp) { if (confirm(\`Remove \${clientIp}?\`)) { await fetch("/api/delete-client", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ nodeId, clientIp }) }); fetchData(); } }
             
-            async function archiveNode(nodeId, archive) {
-                await fetch("/api/archive-node", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ nodeId, archive }) });
-                fetchData();
-            }
-
-            async function toggleImportant(nodeId, clientIp) {
-                await fetch("/api/toggle-important", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ nodeId, clientIp }) });
-                fetchData();
-            }
-
-            async function deleteClient(nodeId, clientIp) {
-                if (!confirm(\`Remove \${clientIp}?\`)) return;
-                await fetch("/api/delete-client", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ nodeId, clientIp }) });
-                fetchData();
-            }
-
             document.getElementById("globalFilter")?.addEventListener("input", render);
             document.getElementById('showOnlyImportant')?.addEventListener('change', render);
             setInterval(fetchData, 5000);
