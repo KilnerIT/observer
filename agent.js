@@ -1,11 +1,11 @@
 /**
- * Observer Node Agent v1.6.1
+ * Observer Node Agent v1.6.2
  * Features:
  * - Automated Nmap Service Discovery (-sV)
  * - Robust XML Fingerprinting (Attribute-order independent)
  * - Secure HTTPS communication for Render Cloud
  * - Location Tagging for Node Identification
- * - Support for 'Important' client status tracking
+ * - String Sanitization (Fixes HTTP 400 parsing errors)
  */
 
 const https = require('https');
@@ -14,14 +14,14 @@ const { exec, execSync } = require('child_process');
 const crypto = require('crypto');
 
 // --- CONFIGURATION ---
-const VERSION = '1.6.1';
+const VERSION = '1.6.2';
 const SERVER_URL = 'https://observer-sxv0.onrender.com/api/heartbeat';
 const HEARTBEAT_INTERVAL = 30000;   // 30 seconds for health checks
 const SCAN_INTERVAL = 300000;      // 5 minutes for full network scans
 const VERBOSE = true; 
 
 // LOCATION TAG: Set this via environment variable 'OBSERVER_LOCATION'
-const LOCATION = process.env.OBSERVER_LOCATION || 'Trust HQ';
+const LOCATION = process.env.OBSERVER_LOCATION || 'Remote Site';
 
 const clientId = crypto.createHash('md5').update(os.hostname()).digest('hex').substring(0, 8);
 
@@ -32,6 +32,15 @@ function log(msg, type = 'INFO') {
     if (!VERBOSE) return;
     const timestamp = new Date().toLocaleTimeString();
     console.log(`[${timestamp}] [${type}] ${msg}`);
+}
+
+/**
+ * Sanitizes strings to prevent JSON parsing errors on the server
+ */
+function clean(str) {
+    if (typeof str !== 'string') return "";
+    // Remove non-printable characters and extra whitespace
+    return str.replace(/[^\x20-\x7E]/g, '').trim();
 }
 
 /**
@@ -61,7 +70,6 @@ function performDiscovery() {
     const targetSubnet = getLocalSubnet();
     log(`Starting discovery sweep on ${targetSubnet} (${LOCATION})...`, "NMAP");
 
-    // Phase 1: Ping scan to find live hosts
     exec(`nmap -sn ${targetSubnet} -oG -`, (err, stdout) => {
         if (err) {
             isScanning = false;
@@ -84,7 +92,7 @@ function performDiscovery() {
 
         log(`Found ${hosts.length} live hosts. Fingerprinting services...`, "NMAP");
         
-        // Phase 2: Service version detection (limit to top 10 for performance)
+        // Phase 2: Service version detection
         const scanTargets = hosts.slice(0, 10).join(' ');
         exec(`nmap -sV -F --version-light ${scanTargets} -oX -`, (sErr, sStdout) => {
             const results = [];
@@ -95,33 +103,29 @@ function performDiscovery() {
                     hostBlocks.shift(); 
 
                     hostBlocks.forEach(block => {
-                        // Extract IP (handling potential MAC addresses in the same block)
                         const ip = (block.match(/addr="([0-9.]+)" addrtype="ipv4"/) || block.match(/addr="([0-9.]+)"/))?.[1];
                         if (!ip) return;
 
-                        // Robust individual attribute extraction
                         const serviceName = block.match(/service name="([^"]+)"/)?.[1] || "unknown";
                         const product = block.match(/product="([^"]+)"/)?.[1] || "";
                         const version = block.match(/version="([^"]+)"/)?.[1] || "";
                         const port = block.match(/portid="([0-9]+)"/)?.[1];
                         
                         results.push({
-                            ip: ip,
-                            name: product ? `${serviceName} (${product})` : serviceName,
-                            description: (version || port) ? `${version ? 'v'+version : ''} ${port ? 'Port: '+port : ''}`.trim() : "Online",
+                            ip: clean(ip),
+                            name: clean(product ? `${serviceName} (${product})` : serviceName),
+                            description: clean((version || port) ? `${version ? 'v'+version : ''} ${port ? 'Port: '+port : ''}` : "Online"),
                             lastSeen: Date.now()
                         });
                     });
                 } catch (parseError) {
-                    log("Error parsing Nmap XML output: " + parseError.message, "ERROR");
+                    log("Error parsing Nmap XML: " + parseError.message, "ERROR");
                 }
             }
 
             lastDiscoveryResults = results;
             isScanning = false;
-            log(`Discovery complete. reporting ${results.length} fingerprinted devices.`, "OK");
-            
-            // Immediate update after scan
+            log(`Discovery complete. reporting ${results.length} devices.`, "OK");
             sendHeartbeat();
         });
     });
@@ -143,18 +147,17 @@ function sendHeartbeat() {
         } catch(e) {}
 
         const payload = JSON.stringify({
-            id: clientId,
-            version: VERSION,
-            location: LOCATION,
-            hostname: os.hostname(),
-            os: os.type() + ' ' + os.release(),
+            id: clean(clientId),
+            version: clean(VERSION),
+            location: clean(LOCATION),
+            hostname: clean(os.hostname()),
+            os: clean(os.type() + ' ' + os.release()),
             uptime: os.uptime(),
-            disk: disk,
+            disk: clean(disk),
             scannedDevices: Array.isArray(lastDiscoveryResults) ? lastDiscoveryResults : [],
             timestamp: Date.now()
         });
 
-        // Convert to Buffer for accurate byte length calculation and transmission
         const body = Buffer.from(payload, 'utf8');
         const url = new URL(SERVER_URL);
         
@@ -164,17 +167,21 @@ function sendHeartbeat() {
             path: url.pathname,
             method: 'POST',
             headers: { 
-                'Content-Type': 'application/json; charset=utf-8', 
+                'Content-Type': 'application/json', 
                 'Content-Length': body.length 
             }
         };
 
         const req = https.request(options, (res) => {
-            if (res.statusCode === 200) {
-                log(`Check-in successful (HTTP ${res.statusCode})`, "API");
-            } else {
-                log(`Server rejected heartbeat (HTTP ${res.statusCode})`, "WARN");
-            }
+            let resData = '';
+            res.on('data', chunk => resData += chunk);
+            res.on('end', () => {
+                if (res.statusCode === 200) {
+                    log(`Check-in successful (HTTP 200)`, "API");
+                } else {
+                    log(`Server Error (HTTP ${res.statusCode}): ${resData}`, "WARN");
+                }
+            });
         });
 
         req.on('error', (e) => log(`Connection failed: ${e.message}`, "ERROR"));
