@@ -21,15 +21,14 @@ const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/aut
 const { getFirestore, doc, setDoc, getDoc, collection, getDocs, updateDoc } = require('firebase/firestore');
 
 // --- CONFIGURATION ---
-const VERSION = '1.4.3'; // Updated for real Web Push subscription flow
+const VERSION = '1.4.4'; // Incremented for VAPID integration
 const PORT = 8080; 
 const OFFLINE_THRESHOLD = 60000;
 const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 
-// VAPID Public Key (Required for iOS to show the prompt)
-// Generate one using: npx web-push generate-vapid-keys
-const VAPID_PUBLIC_KEY = 'BEn_xXv6f...replace_with_your_actual_public_key...';
+// VAPID Public Key (REQUIRED: Get this from Firebase Console > Project Settings > Cloud Messaging)
+const VAPID_PUBLIC_KEY = 'REPLACE_WITH_YOUR_ACTUAL_FIREBASE_PUBLIC_VAPID_KEY';
 
 let firebaseConfig = null;
 if (fs.existsSync(CONFIG_PATH)) {
@@ -85,7 +84,6 @@ async function sendMobilePush(title, body, isOnline) {
         tokensSnapshot.forEach(doc => tokens.push(doc.id));
         if (tokens.length === 0) return;
         console.log(`[PUSH] Dispatching alerts to ${tokens.length} mobile devices...`);
-        // In production, use the 'web-push' library here to send to the stored subscription endpoints
     } catch (e) {
         console.error("[PUSH ERROR]", e.message);
     }
@@ -139,7 +137,7 @@ const server = http.createServer(async (req, res) => {
         }));
     }
 
-    // PWA: Service Worker (Required for iOS Push)
+    // PWA: Service Worker
     if (url.pathname === '/sw.js') {
         res.writeHead(200, { 'Content-Type': 'application/javascript' });
         return res.end(`
@@ -204,7 +202,6 @@ const server = http.createServer(async (req, res) => {
             try {
                 const { subscription } = JSON.parse(body);
                 if (currentUser && subscription) {
-                    // Store the full subscription object (including endpoint and keys)
                     const subId = Buffer.from(subscription.endpoint).toString('base64').substring(0, 50);
                     await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'push_tokens', subId), {
                         subscription,
@@ -276,14 +273,13 @@ function generateUI() {
     </head>
     <body class="bg-[#0b0f1a] text-slate-200 min-h-screen font-sans selection:bg-blue-500/30">
         <div id="app" class="p-4 md:p-6 max-w-7xl mx-auto">
-            <!-- Header -->
-            <div class="flex flex-col lg:flex-row justify-between items-start lg:items-center mb-8 gap-4">
+            <header class="flex flex-col lg:flex-row justify-between items-start lg:items-center mb-8 gap-4">
                 <div>
                     <h1 class="text-2xl md:text-3xl font-black text-white flex items-center gap-3">
                         <i class="fas fa-satellite-dish text-blue-500"></i> OBSERVER <span class="text-blue-500">CENTRAL</span>
                     </h1>
                     <div class="flex items-center gap-3 mt-1">
-                        <p class="text-slate-500 text-xs md:text-sm font-medium">Infrastructure Command & Discovery</p>
+                        <p class="text-slate-500 text-xs md:text-sm font-medium uppercase tracking-tight">Infrastructure Command</p>
                         <span class="text-[9px] bg-slate-800 text-blue-400 px-2 py-0.5 rounded font-bold border border-slate-700 tracking-wider uppercase">v${VERSION}</span>
                     </div>
                 </div>
@@ -291,17 +287,13 @@ function generateUI() {
                     <button id="notifBtn" onclick="initMobilePush()" class="flex-1 lg:flex-none px-4 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-blue-500/20">
                         <i class="fas fa-mobile-alt"></i> Setup Mobile Alerts
                     </button>
-                    <input type="text" id="globalFilter" placeholder="Search nodes..." 
-                           class="flex-1 lg:flex-none bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 min-w-[200px]">
+                    <input type="text" id="globalFilter" placeholder="Filter..." 
+                           class="flex-1 lg:flex-none bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 min-w-[150px]">
                 </div>
-            </div>
-
-            <!-- Main Node Grid -->
+            </header>
             <div id="mainView">
                 <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6" id="nodeGrid"></div>
             </div>
-
-            <!-- Discovery Explorer -->
             <div id="explorerView" class="hidden">
                 <button onclick="showMain()" class="mb-6 flex items-center gap-2 text-slate-400 hover:text-white transition-colors font-bold text-sm">
                     <i class="fas fa-arrow-left text-xs"></i> BACK TO FLEET
@@ -310,7 +302,6 @@ function generateUI() {
             </div>
         </div>
 
-        <!-- Custom iOS Modal -->
         <div id="iosModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-6 hidden">
             <div class="bg-slate-900 border border-slate-800 rounded-3xl p-8 max-sm w-full shadow-2xl">
                 <div class="text-center">
@@ -318,26 +309,8 @@ function generateUI() {
                         <i class="fas fa-plus text-blue-400 text-2xl"></i>
                     </div>
                     <h2 class="text-xl font-bold text-white mb-4">Action Required</h2>
-                    <p class="text-slate-400 text-sm mb-6 leading-relaxed">
-                        To enable notifications on iOS, you must add this app to your Home Screen:
-                    </p>
-                    <div class="space-y-4 text-left">
-                        <div class="flex items-center gap-4 bg-slate-800/50 p-3 rounded-xl">
-                            <i class="fas fa-share-square text-blue-400"></i>
-                            <span class="text-xs font-medium text-slate-300">1. Tap the Share button in Chrome</span>
-                        </div>
-                        <div class="flex items-center gap-4 bg-slate-800/50 p-3 rounded-xl">
-                            <i class="fas fa-plus-square text-blue-400"></i>
-                            <span class="text-xs font-medium text-slate-300">2. Select "Add to Home Screen"</span>
-                        </div>
-                        <div class="flex items-center gap-4 bg-slate-800/50 p-3 rounded-xl">
-                            <i class="fas fa-mobile text-blue-400"></i>
-                            <span class="text-xs font-medium text-slate-300">3. Open from Home Screen and Setup</span>
-                        </div>
-                    </div>
-                    <button onclick="closeIosModal()" class="mt-8 w-full py-3 bg-slate-800 hover:bg-slate-700 text-white rounded-xl font-bold text-sm transition-all">
-                        Got it
-                    </button>
+                    <p class="text-slate-400 text-sm mb-6 leading-relaxed">To enable notifications on iOS, you must add this app to your Home Screen.</p>
+                    <button onclick="closeIosModal()" class="w-full py-3 bg-slate-800 hover:bg-slate-700 text-white rounded-xl font-bold text-sm transition-all">Got it</button>
                 </div>
             </div>
         </div>
@@ -347,7 +320,6 @@ function generateUI() {
             let activeNodeId = null;
             const VAPID_KEY = '${VAPID_PUBLIC_KEY}';
 
-            // Helper to convert VAPID key
             function urlBase64ToUint8Array(base64String) {
                 const padding = '='.repeat((4 - base64String.length % 4) % 4);
                 const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
@@ -357,29 +329,18 @@ function generateUI() {
                 return outputArray;
             }
 
-            // Service Worker Registration
             if ('serviceWorker' in navigator) {
                 window.addEventListener('load', () => {
                     navigator.serviceWorker.register('/sw.js').catch(err => console.log('SW failed:', err));
                 });
             }
 
-            function isIos() {
-                return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
-            }
-
-            function isStandalone() {
-                return (window.navigator.standalone) || (window.matchMedia('(display-mode: standalone)').matches);
-            }
-
-            function closeIosModal() {
-                document.getElementById('iosModal').classList.add('hidden');
-            }
+            function isIos() { return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream; }
+            function isStandalone() { return (window.navigator.standalone) || (window.matchMedia('(display-mode: standalone)').matches); }
+            function closeIosModal() { document.getElementById('iosModal').classList.add('hidden'); }
 
             async function initMobilePush() {
                 const btn = document.getElementById('notifBtn');
-                
-                // CRITICAL: iOS only prompts if in standalone mode
                 if (isIos() && !isStandalone()) {
                     document.getElementById('iosModal').classList.remove('hidden');
                     return;
@@ -387,17 +348,12 @@ function generateUI() {
 
                 try {
                     btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Subscribing...';
-                    
-                    // 1. Wait for Service Worker
                     const registration = await navigator.serviceWorker.ready;
-                    
-                    // 2. Request Subscription (This triggers the system prompt on iOS)
                     const subscription = await registration.pushManager.subscribe({
                         userVisibleOnly: true,
                         applicationServerKey: urlBase64ToUint8Array(VAPID_KEY)
                     });
 
-                    // 3. Send subscription to server
                     await fetch('/api/register-token', {
                         method: 'POST',
                         body: JSON.stringify({ subscription })
@@ -406,12 +362,10 @@ function generateUI() {
                     btn.innerHTML = '<i class="fas fa-check-circle text-emerald-400"></i> Alerts Active';
                     btn.classList.replace('bg-blue-600', 'bg-emerald-500/10');
                     btn.classList.add('text-emerald-400', 'border-emerald-500/20');
-                    
-                    alert("System alerts enabled successfully!");
                 } catch (e) {
                     console.error("Subscription Error:", e);
-                    btn.innerHTML = '<i class="fas fa-exclamation-triangle"></i> Setup Failed';
-                    alert("Unable to enable alerts. Ensure your browser is up to date and you have a valid VAPID key configured on the server.");
+                    btn.innerHTML = '<i class="fas fa-mobile-alt"></i> Setup Failed';
+                    alert("Ensure you have a valid VAPID Key set in server.js and are using HTTPS or localhost.");
                 }
             }
 
@@ -472,7 +426,7 @@ function generateUI() {
                     <div class="bg-slate-900/50 border border-slate-800 rounded-3xl p-6 md:p-8 mb-6 text-left">
                         <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
                             <div>
-                                <h2 class="text-2xl font-bold text-white">\${node.hostname}</h2>
+                                <h2 class="text-2xl font-bold text-white uppercase tracking-tighter">\${node.hostname}</h2>
                                 <p class="text-slate-500 text-xs font-medium uppercase tracking-widest mt-1">Subnet: \${node.ip.replace('::ffff:', '')}</p>
                             </div>
                             <div class="text-[10px] bg-slate-800 text-slate-400 px-3 py-1.5 rounded-xl border border-slate-700 font-bold uppercase tracking-tighter">LAST SYNC: \${new Date(node.lastSeen).toLocaleTimeString()}</div>
@@ -487,8 +441,8 @@ function generateUI() {
                                         <span class="text-blue-400 font-mono font-bold text-xs font-black">\${c.ip}</span>
                                         <button onclick="deleteClient('\${node.id}', '\${c.ip}')" class="text-slate-600 hover:text-red-500 transition-colors p-1"><i class="fas fa-trash-alt text-xs"></i></button>
                                     </div>
-                                    <h4 class="text-white font-bold mb-1 truncate text-sm uppercase tracking-tight">\${c.name || 'Generic Device'}</h4>
-                                    <p class="text-[10px] text-slate-500 mb-4 truncate font-medium uppercase">\${c.description || 'Discovery log pending...'}</p>
+                                    <h4 class="text-white font-bold mb-1 truncate text-sm uppercase tracking-tight font-black">\${c.name || 'Generic Device'}</h4>
+                                    <p class="text-[10px] text-slate-500 mb-4 truncate font-medium uppercase tracking-tighter">\${c.description || 'Discovery pending...'}</p>
                                     <div class="flex justify-between items-center text-[8px] font-bold text-slate-600 uppercase pt-3 border-t border-slate-800 tracking-tighter">
                                         <span>Seen: \${new Date(c.lastSeen).toLocaleTimeString()}</span>
                                         <span class="\${isOld ? 'text-orange-500' : 'text-emerald-500'} font-black">\${isOld ? 'Stale' : 'Active'}</span>
@@ -516,7 +470,7 @@ function generateUI() {
             }
 
             async function deleteClient(nodeId, clientIp) {
-                if (!confirm(\`Remove \${clientIp} from the fleet inventory?\`)) return;
+                if (!confirm(\`Remove \${clientIp}?\`)) return;
                 try {
                     await fetch('/api/delete-client', { method: 'POST', body: JSON.stringify({ nodeId, clientIp }) });
                     fetchData();
