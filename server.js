@@ -16,7 +16,7 @@ const path = require('path');
 
 // Firebase SDKs
 const { initializeApp } = require('firebase/app');
-const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/app');
+const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/auth');
 const { getFirestore, doc, setDoc, getDoc, collection, getDocs, updateDoc } = require('firebase/firestore');
 
 // --- CONFIGURATION ---
@@ -276,7 +276,7 @@ function generateUI() {
 
         <!-- Custom iOS Modal -->
         <div id="iosModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-6 hidden">
-            <div class="bg-slate-900 border border-slate-800 rounded-3xl p-8 max-w-sm w-full shadow-2xl">
+            <div class="bg-slate-900 border border-slate-800 rounded-3xl p-8 max-sm w-full shadow-2xl">
                 <div class="text-center">
                     <div class="w-16 h-16 bg-blue-500/10 rounded-2xl flex items-center justify-center mx-auto mb-6 border border-blue-500/20">
                         <i class="fas fa-plus text-blue-400 text-2xl"></i>
