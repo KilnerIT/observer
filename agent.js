@@ -1,11 +1,12 @@
 /**
- * Observer Node Agent v1.6.2
+ * Observer Node Agent v1.6.3
  * Features:
  * - Automated Nmap Service Discovery (-sV)
  * - Robust XML Fingerprinting (Attribute-order independent)
  * - Secure HTTPS communication for Render Cloud
  * - Location Tagging for Node Identification
  * - String Sanitization (Fixes HTTP 400 parsing errors)
+ * - Null-safety guards for scan results
  */
 
 const https = require('https');
@@ -14,7 +15,7 @@ const { exec, execSync } = require('child_process');
 const crypto = require('crypto');
 
 // --- CONFIGURATION ---
-const VERSION = '1.6.2';
+const VERSION = '1.6.3';
 const SERVER_URL = 'https://observer-sxv0.onrender.com/api/heartbeat';
 const HEARTBEAT_INTERVAL = 30000;   // 30 seconds for health checks
 const SCAN_INTERVAL = 300000;      // 5 minutes for full network scans
