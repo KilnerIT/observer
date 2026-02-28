@@ -26,31 +26,24 @@ const CONFIG_PATH = path.join(__dirname, 'config.json');
 
 /**
  * FIREBASE CONFIGURATION LOAD (RUNTIME)
- * This logic attempts to load from the environment (Canvas) first,
- * then checks for a local 'config.json' file.
  */
 let firebaseConfig = null;
 
-// 1. Check environment variable (Canvas context)
 if (typeof __firebase_config !== 'undefined') {
     firebaseConfig = JSON.parse(__firebase_config);
 } 
-// 2. Check for local config.json (Local execution context)
 else if (fs.existsSync(CONFIG_PATH)) {
     try {
         const configData = fs.readFileSync(CONFIG_PATH, 'utf8');
         firebaseConfig = JSON.parse(configData);
-        console.log("[CONFIG] Successfully loaded Firebase credentials from config.json");
+        console.log("[CONFIG] Loaded Firebase credentials from config.json");
     } catch (err) {
         console.error("[CONFIG] Error parsing config.json:", err.message);
     }
 }
 
 if (!firebaseConfig || !firebaseConfig.apiKey) {
-    console.error("\n[CRITICAL] No Firebase configuration found!");
-    console.error("Please create a 'config.json' file in the server directory with your credentials.");
-    console.error("This is required for persistent storage to work.\n");
-    // We allow the server to start, but DB operations will fail gracefully
+    console.error("\n[CRITICAL] No Firebase configuration found! Persistence will not work.\n");
 }
 
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'observer-default';
@@ -63,12 +56,14 @@ if (firebaseConfig) {
         app = initializeApp(firebaseConfig);
         auth = getAuth(app);
         db = getFirestore(app);
+        console.log(`[INIT] Firebase initialized for Project: ${firebaseConfig.projectId}`);
+        console.log(`[INIT] Target App ID: ${appId}`);
     } catch (e) {
-        console.error("\n[CRITICAL] Firebase failed to initialize. Check your config.json syntax.");
+        console.error("\n[CRITICAL] Firebase failed to initialize. Check config.json.", e.message);
     }
 }
 
-// State: Local cache for fast dashboard serving
+// State: Local cache
 const clients = new Map();
 let currentUser = null;
 
@@ -84,9 +79,8 @@ const initAuth = async () => {
             await signInAnonymously(auth);
         }
     } catch (err) {
-        console.error("\n[AUTH ERROR] Could not sign in to Firebase.");
-        console.error("Reason:", err.message);
-        console.error("Action Required: Ensure 'Anonymous Authentication' is enabled in your Firebase Console.\n");
+        console.error("\n[AUTH ERROR] Failed to sign in:", err.message);
+        console.error("TIP: Ensure 'Anonymous' provider is enabled in Firebase Console > Authentication.\n");
     }
 };
 
@@ -95,18 +89,30 @@ const initAuth = async () => {
  */
 async function loadPersistedClients() {
     if (!currentUser || !db) return;
-    console.log("[DB] Synchronizing state from cloud...");
+    
+    // Construct Path (Mandatory Rule 1)
+    const colPath = `artifacts/${appId}/public/data/nodes`;
+    console.log(`[DB] Attempting to sync from: ${colPath}`);
+    
     try {
         const nodesCol = collection(db, 'artifacts', appId, 'public', 'data', 'nodes');
         const querySnapshot = await getDocs(nodesCol);
         
-        querySnapshot.forEach((doc) => {
-            clients.set(doc.id, doc.data());
-        });
-        
-        console.log(`[DB] Successfully restored ${clients.size} nodes from persistence.`);
+        if (querySnapshot.empty) {
+            console.log("[DB] Sync Complete: 0 existing nodes found. Waiting for first heartbeats.");
+        } else {
+            querySnapshot.forEach((doc) => {
+                clients.set(doc.id, doc.data());
+            });
+            console.log(`[DB] Sync Complete: Restored ${clients.size} nodes from cloud.`);
+        }
     } catch (err) {
-        console.error("[DB] Failed to load nodes from Firestore:", err.message);
+        if (err.message.includes('NOT_FOUND')) {
+            console.error("\n[DB ERROR] Firestore Database Not Found (Code 5).");
+            console.error("FIX: Go to Firebase Console -> Build -> Firestore Database and click 'Create Database'.\n");
+        } else {
+            console.error("[DB ERROR] Failed to fetch nodes:", err.message);
+        }
     }
 }
 
@@ -115,17 +121,17 @@ if (auth) {
     onAuthStateChanged(auth, async (user) => {
         currentUser = user;
         if (user) {
-            console.log(`[AUTH] Session active for UID: ${user.uid}`);
+            console.log(`[AUTH] Session verified for UID: ${user.uid}`);
             await loadPersistedClients();
         }
     });
 }
 
 /**
- * Synchronizes the Server code with the GitHub repository.
+ * GitHub Sync
  */
 function syncWithGithub() {
-    console.log(`[GIT] Checking for server updates from ${GITHUB_REPO}...`);
+    console.log(`[GIT] Checking for server updates...`);
     try {
         execSync('git rev-parse --is-inside-work-tree', { stdio: 'ignore' });
         const output = execSync('git pull origin main', { encoding: 'utf8' });
@@ -163,9 +169,12 @@ const server = http.createServer((req, res) => {
 
                 clients.set(data.id, nodeData);
 
+                // Save to Firestore
                 if (currentUser && db) {
                     const nodeRef = doc(db, 'artifacts', appId, 'public', 'data', 'nodes', data.id);
-                    setDoc(nodeRef, nodeData).catch(err => console.error("[DB] Save failed:", err.message));
+                    setDoc(nodeRef, nodeData).catch(err => {
+                        console.error(`[DB SAVE ERROR] ${err.message}`);
+                    });
                 }
 
                 res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -218,11 +227,11 @@ function generateDashboardHTML() {
                     <h1 class="text-4xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-emerald-400">
                         Observer Central
                     </h1>
-                    <p class="text-gray-400 mt-1">Infrastructure Persistence Dashboard</p>
+                    <p class="text-gray-400 mt-1 text-sm">Enterprise Node Persistence Layer</p>
                 </div>
                 <div class="flex items-center gap-3 bg-gray-800/50 p-3 rounded-xl border border-gray-700">
                     <div class="w-2.5 h-2.5 rounded-full bg-blue-500 animate-pulse"></div>
-                    <span class="text-xs font-mono text-gray-300 tracking-tighter uppercase">Cloud Persistence Sync Active</span>
+                    <span class="text-[10px] font-mono text-gray-400 tracking-tighter uppercase">Cloud Storage Active</span>
                 </div>
             </header>
             <div class="grid grid-cols-1 xl:grid-cols-2 gap-8" id="client-grid"></div>
@@ -300,7 +309,7 @@ function generateDashboardHTML() {
                                                             \${dev.name !== 'Unresponsive' ? 'SNMP' : 'Down'}
                                                         </span>
                                                     </div>
-                                                    <span class="text-[11px] font-medium text-white truncate text-left">\${dev.name}</span>
+                                                    <span class="text-[11px] font-medium text-white truncate text-left font-bold">\${dev.name}</span>
                                                     <span class="text-[9px] text-gray-500 italic truncate text-left">\${dev.description}</span>
                                                 </div>
                                             \`).join('')
