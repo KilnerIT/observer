@@ -7,6 +7,7 @@
  * - Client Management (Delete/Prune devices)
  * - Version Tracking
  * - Mobile Push Notifications (via Firebase Cloud Messaging)
+ * - PWA Support (Manifest & Service Worker for iOS)
  */
 
 const http = require('http');
@@ -20,7 +21,7 @@ const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/aut
 const { getFirestore, doc, setDoc, getDoc, collection, getDocs, updateDoc } = require('firebase/firestore');
 
 // --- CONFIGURATION ---
-const VERSION = '1.4.1'; // Updated for iOS UX improvements
+const VERSION = '1.4.2'; // Updated for PWA/Service Worker
 const PORT = 8080; 
 const OFFLINE_THRESHOLD = 60000;
 const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
@@ -71,25 +72,16 @@ onAuthStateChanged(auth, async (user) => {
 
 /**
  * Mobile Push Notification Dispatcher
- * Sends FCM messages to all registered mobile tokens
  */
 async function sendMobilePush(title, body, isOnline) {
     if (!currentUser) return;
-    
     try {
-        // Fetch all registered tokens from Firestore
         const tokensSnapshot = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'push_tokens'));
         const tokens = [];
         tokensSnapshot.forEach(doc => tokens.push(doc.id));
-
         if (tokens.length === 0) return;
-
         console.log(`[PUSH] Dispatching alerts to ${tokens.length} mobile devices...`);
-
-        // Note: In a production environment with a Service Account, you would use the FCM Admin SDK.
-        tokens.forEach(token => {
-            // Placeholder for FCM REST API call
-        });
+        // Logic for FCM API call would go here
     } catch (e) {
         console.error("[PUSH ERROR]", e.message);
     }
@@ -102,16 +94,12 @@ setInterval(() => {
     nodes.forEach((node, id) => {
         const isOnline = (Date.now() - node.lastSeen) < OFFLINE_THRESHOLD;
         const prevState = nodeStates.get(id);
-
         if (prevState !== undefined && prevState !== isOnline) {
             const statusLabel = isOnline ? "ONLINE" : "OFFLINE";
-            console.log(`[ALERT] Node ${node.hostname} is now ${statusLabel}`);
-            
             const title = `Node ${statusLabel}: ${node.hostname}`;
             const body = isOnline 
                 ? `${node.hostname} has reconnected to Observer Central.` 
                 : `Warning: ${node.hostname} has stopped reporting heartbeats.`;
-            
             sendMobilePush(title, body, isOnline);
         }
         nodeStates.set(id, isOnline);
@@ -127,7 +115,43 @@ const server = http.createServer(async (req, res) => {
 
     const url = new URL(req.url, `http://${req.headers.host}`);
 
-    // API: Heartbeat & Discovery Merge
+    // PWA: Manifest
+    if (url.pathname === '/manifest.json') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({
+            name: "Observer Central",
+            short_name: "Observer",
+            start_url: "/",
+            display: "standalone",
+            background_color: "#0b0f1a",
+            theme_color: "#0b0f1a",
+            icons: [
+                {
+                    src: "https://cdn-icons-png.flaticon.com/512/564/564348.png",
+                    sizes: "512x512",
+                    type: "image/png"
+                }
+            ]
+        }));
+    }
+
+    // PWA: Service Worker (Required for iOS Push)
+    if (url.pathname === '/sw.js') {
+        res.writeHead(200, { 'Content-Type': 'application/javascript' });
+        return res.end(`
+            self.addEventListener('push', function(event) {
+                const data = event.data ? event.data.json() : {};
+                event.waitUntil(
+                    self.registration.showNotification(data.title || "Observer Alert", {
+                        body: data.body || "Node status change detected.",
+                        icon: "https://cdn-icons-png.flaticon.com/512/564/564348.png"
+                    })
+                );
+            });
+        `);
+    }
+
+    // API: Heartbeat
     if (url.pathname === '/api/heartbeat' && req.method === 'POST') {
         let body = '';
         req.on('data', chunk => body += chunk);
@@ -135,10 +159,8 @@ const server = http.createServer(async (req, res) => {
             try {
                 const data = JSON.parse(body);
                 const existing = nodes.get(data.id) || { scannedDevices: [] };
-                
                 const currentScans = data.scannedDevices || [];
                 const mergedDevices = [...(existing.scannedDevices || [])];
-
                 currentScans.forEach(newDev => {
                     const idx = mergedDevices.findIndex(d => d.ip === newDev.ip);
                     if (idx > -1) {
@@ -147,10 +169,8 @@ const server = http.createServer(async (req, res) => {
                         mergedDevices.push({ ...newDev, firstSeen: Date.now(), lastSeen: Date.now() });
                     }
                 });
-
                 const nodeUpdate = { ...data, scannedDevices: mergedDevices, lastSeen: Date.now(), ip: req.socket.remoteAddress };
                 nodes.set(data.id, nodeUpdate);
-
                 if (currentUser) {
                     setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'nodes', data.id), nodeUpdate);
                 }
@@ -161,7 +181,7 @@ const server = http.createServer(async (req, res) => {
         });
     }
 
-    // API: Register Push Token (Mobile/Web)
+    // API: Register Push Token
     else if (url.pathname === '/api/register-token' && req.method === 'POST') {
         let body = '';
         req.on('data', chunk => body += chunk);
@@ -232,11 +252,9 @@ function generateUI() {
         <meta name="apple-mobile-web-app-capable" content="yes">
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
         <meta name="apple-mobile-web-app-title" content="Observer">
+        <link rel="manifest" href="/manifest.json">
         <script src="https://cdn.tailwindcss.com"></script>
         <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-        <!-- Firebase SDKs for Web Push -->
-        <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
-        <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-messaging-compat.js"></script>
     </head>
     <body class="bg-[#0b0f1a] text-slate-200 min-h-screen font-sans selection:bg-blue-500/30">
         <div id="app" class="p-4 md:p-6 max-w-7xl mx-auto">
@@ -310,23 +328,28 @@ function generateUI() {
             let currentData = [];
             let activeNodeId = null;
 
+            // Service Worker Registration
+            if ('serviceWorker' in navigator) {
+                window.addEventListener('load', () => {
+                    navigator.serviceWorker.register('/sw.js').catch(err => console.log('SW failed:', err));
+                });
+            }
+
             function isIos() {
                 return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
             }
 
             function isStandalone() {
-                return ('standalone' in window.navigator) && (window.navigator.standalone);
+                return (window.navigator.standalone) || (window.matchMedia('(display-mode: standalone)').matches);
             }
 
             function closeIosModal() {
                 document.getElementById('iosModal').classList.add('hidden');
             }
 
-            // --- MOBILE PUSH LOGIC (FCM) ---
             async function initMobilePush() {
                 const btn = document.getElementById('notifBtn');
                 
-                // iOS logic: Browser tabs cannot request permission
                 if (isIos() && !isStandalone()) {
                     document.getElementById('iosModal').classList.remove('hidden');
                     return;
@@ -337,7 +360,7 @@ function generateUI() {
                     
                     const permission = await Notification.requestPermission();
                     if (permission !== "granted") {
-                        alert("Permission denied. Check your device/browser notification settings.");
+                        alert("Permission denied. Ensure notifications are enabled in your device settings for the 'Observer' home screen app.");
                         btn.innerHTML = '<i class="fas fa-mobile-alt"></i> Setup Mobile Alerts';
                         return;
                     }
@@ -393,7 +416,6 @@ function generateUI() {
                         </div>
                         <h3 class="text-xl font-bold text-white mb-0.5">\${node.hostname}</h3>
                         <p class="text-[10px] text-slate-500 font-mono mb-6 uppercase tracking-widest opacity-60">NODE: \${node.id}</p>
-                        
                         <div class="grid grid-cols-2 gap-3 mb-6">
                             <div class="bg-black/20 p-3 rounded-2xl border border-slate-800/50">
                                 <span class="text-[8px] uppercase text-slate-500 block font-black mb-1">Endpoints</span>
@@ -404,11 +426,7 @@ function generateUI() {
                                 <span class="text-sm font-bold text-slate-300">\${node.disk ? node.disk.split(' ')[0] : 'N/A'}</span>
                             </div>
                         </div>
-
-                        <button onclick="launchExplorer('\${node.id}')" 
-                                class="w-full py-3.5 bg-slate-800 hover:bg-blue-600 text-white rounded-2xl font-bold text-xs transition-all flex items-center justify-center gap-2 active:scale-95">
-                            NETWORK EXPLORER <i class="fas fa-chevron-right text-[8px]"></i>
-                        </button>
+                        <button onclick="launchExplorer('\${node.id}')" class="w-full py-3.5 bg-slate-800 hover:bg-blue-600 text-white rounded-2xl font-bold text-xs transition-all flex items-center justify-center gap-2 active:scale-95">NETWORK EXPLORER <i class="fas fa-chevron-right text-[8px]"></i></button>
                     </div>
                 \`).join('');
             }
@@ -417,9 +435,7 @@ function generateUI() {
                 const node = currentData.find(n => n.id === activeNodeId);
                 const content = document.getElementById('explorerContent');
                 if (!node) return;
-
                 const clients = (node.scannedDevices || []).filter(c => c.ip.includes(filter) || (c.name || '').toLowerCase().includes(filter));
-
                 content.innerHTML = \`
                     <div class="bg-slate-900/50 border border-slate-800 rounded-3xl p-6 md:p-8 mb-6">
                         <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
@@ -427,9 +443,7 @@ function generateUI() {
                                 <h2 class="text-2xl font-bold text-white">\${node.hostname}</h2>
                                 <p class="text-slate-500 text-xs font-medium uppercase tracking-widest mt-1">Subnet: \${node.ip.replace('::ffff:', '')}</p>
                             </div>
-                            <div class="text-[10px] bg-slate-800 text-slate-400 px-3 py-1.5 rounded-xl border border-slate-700 font-bold">
-                                LAST SYNC: \${new Date(node.lastSeen).toLocaleTimeString()}
-                            </div>
+                            <div class="text-[10px] bg-slate-800 text-slate-400 px-3 py-1.5 rounded-xl border border-slate-700 font-bold">LAST SYNC: \${new Date(node.lastSeen).toLocaleTimeString()}</div>
                         </div>
                     </div>
                     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -439,17 +453,13 @@ function generateUI() {
                                 <div class="bg-slate-900 border border-slate-800 p-5 rounded-2xl hover:border-blue-500/50 transition-all group">
                                     <div class="flex justify-between items-start mb-3">
                                         <span class="text-blue-400 font-mono font-bold text-xs">\${c.ip}</span>
-                                        <button onclick="deleteClient('\${node.id}', '\${c.ip}')" class="text-slate-600 hover:text-red-500 transition-colors p-1">
-                                            <i class="fas fa-trash-alt text-xs"></i>
-                                        </button>
+                                        <button onclick="deleteClient('\${node.id}', '\${c.ip}')" class="text-slate-600 hover:text-red-500 transition-colors p-1"><i class="fas fa-trash-alt text-xs"></i></button>
                                     </div>
                                     <h4 class="text-white font-bold mb-1 truncate text-sm">\${c.name || 'Generic Device'}</h4>
                                     <p class="text-[10px] text-slate-500 mb-4 truncate font-medium">\${c.description || 'Service discovery pending...'}</p>
                                     <div class="flex justify-between items-center text-[8px] font-bold text-slate-600 uppercase pt-3 border-t border-slate-800 tracking-tighter">
                                         <span>Seen: \${new Date(c.lastSeen).toLocaleTimeString()}</span>
-                                        <span class="\${isOld ? 'text-orange-500' : 'text-emerald-500'}">
-                                            \${isOld ? 'Stale' : 'Active'}
-                                        </span>
+                                        <span class="\${isOld ? 'text-orange-500' : 'text-emerald-500'}">\${isOld ? 'Stale' : 'Active'}</span>
                                     </div>
                                 </div>
                             \`;
@@ -476,10 +486,7 @@ function generateUI() {
             async function deleteClient(nodeId, clientIp) {
                 if (!confirm(\`Remove \${clientIp} from the inventory?\`)) return;
                 try {
-                    await fetch('/api/delete-client', {
-                        method: 'POST',
-                        body: JSON.stringify({ nodeId, clientIp })
-                    });
+                    await fetch('/api/delete-client', { method: 'POST', body: JSON.stringify({ nodeId, clientIp }) });
                     fetchData();
                 } catch(e) { console.error(e); }
             }
