@@ -1,11 +1,11 @@
 /**
- * Observer Central - Enterprise Infrastructure Hub v1.7.0
+ * Observer Central - Enterprise Infrastructure Hub v1.8.0
  * Features:
- * - Refined Professional UI: Slate Grey, White, and Blue palette
- * - Priority Device Monitor: Live list of important endpoints on Node cards
- * - System Config: Customizable branding (Logo, Title) via UI
- * - Navigation: Compact icon-based explorer access
- * - Firebase Persistent Settings
+ * - High-Density List View: Optimized for large fleets with reduced whitespace
+ * - Global Stats Bar: Total Nodes, Total Clients, and Priority Asset counts
+ * - Prominent Left-Aligned Status: Instant visibility of node health
+ * - Site-Centric Labeling: Prioritizes Location/Site titles over hostnames
+ * - System Config: Customizable branding via UI
  */
 
 const http = require('http');
@@ -15,11 +15,11 @@ const path = require('path');
 
 // Firebase SDKs
 const { initializeApp } = require('firebase/app');
-const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/auth');
+const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/app');
 const { getFirestore, doc, setDoc, getDoc, collection, getDocs, updateDoc } = require('firebase/firestore');
 
 // --- CONFIGURATION ---
-const VERSION = '1.7.0'; 
+const VERSION = '1.8.0'; 
 const PORT = process.env.PORT || 8080; 
 const OFFLINE_THRESHOLD = 60000;
 const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
@@ -58,11 +58,8 @@ onAuthStateChanged(auth, async (user) => {
     if (user) {
         console.log(`[SYSTEM] Authenticated. Loading persistence for ${appId}...`);
         try {
-            // Load Nodes
             const snapshot = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'nodes'));
             snapshot.forEach(d => nodes.set(d.id, d.data()));
-            
-            // Load Settings
             const setDocRef = await getDoc(doc(db, 'artifacts', appId, 'public', 'settings', 'config'));
             if (setDocRef.exists()) settings = { ...settings, ...setDocRef.data() };
         } catch(e) { console.error("Recovery failed:", e.message); }
@@ -77,7 +74,6 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
     const url = new URL(req.url, `http://${req.headers.host}`);
 
-    // PWA Assets
     if (url.pathname === '/manifest.json') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({
@@ -96,7 +92,6 @@ const server = http.createServer(async (req, res) => {
         });`);
     }
 
-    // API: Heartbeat
     if (url.pathname === '/api/heartbeat' && req.method === 'POST') {
         let body = '';
         req.on('data', chunk => body += chunk);
@@ -127,7 +122,6 @@ const server = http.createServer(async (req, res) => {
         });
     }
 
-    // API: Update Settings
     else if (url.pathname === '/api/update-settings' && req.method === 'POST') {
         let body = '';
         req.on('data', chunk => body += chunk);
@@ -139,7 +133,6 @@ const server = http.createServer(async (req, res) => {
         });
     }
 
-    // API: Archive Node
     else if (url.pathname === '/api/archive-node' && req.method === 'POST') {
         let body = '';
         req.on('data', chunk => body += chunk);
@@ -155,7 +148,6 @@ const server = http.createServer(async (req, res) => {
         });
     }
 
-    // API: Toggle Important Client
     else if (url.pathname === '/api/toggle-important' && req.method === 'POST') {
         let body = '';
         req.on('data', chunk => body += chunk);
@@ -173,7 +165,6 @@ const server = http.createServer(async (req, res) => {
         });
     }
 
-    // API: Status
     else if (url.pathname === '/api/status') {
         const list = Array.from(nodes.values()).map(n => ({
             ...n, isOnline: (Date.now() - (n.lastSeen || 0)) < OFFLINE_THRESHOLD
@@ -182,7 +173,6 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ nodes: list, settings }));
     }
 
-    // Dashboard UI
     else {
         res.writeHead(200, { 'Content-Type': 'text/html' });
         res.end(generateUI());
@@ -203,72 +193,93 @@ function generateUI() {
         <script src="https://cdn.tailwindcss.com"></script>
         <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
         <style>
-            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap');
+            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700;900&display=swap');
             body { font-family: 'Inter', sans-serif; background-color: #0f172a; }
-            .node-card { background: #1e293b; border: 1px solid #334155; }
-            .priority-item { border-left: 2px solid #3b82f6; }
+            .node-row { background: #1e293b; border: 1px solid #334155; transition: all 0.2s ease; }
+            .node-row:hover { border-color: #475569; background: #1e293b; transform: translateX(4px); }
             .important-glow { border-color: #fbbf24 !important; box-shadow: 0 0 15px rgba(251, 191, 36, 0.1); }
+            ::-webkit-scrollbar { width: 8px; }
+            ::-webkit-scrollbar-track { background: #0f172a; }
+            ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
         </style>
     </head>
     <body class="text-slate-200 min-h-screen antialiased">
-        <div id="app" class="p-4 md:p-8 max-w-7xl mx-auto">
-            <header class="flex flex-col lg:flex-row justify-between items-start lg:items-center mb-12 gap-6">
-                <div class="flex items-center gap-5">
-                    <img id="headerLogo" src="" class="w-12 h-12 object-contain" alt="Logo">
+        <div id="app" class="p-4 md:p-6 max-w-7xl mx-auto">
+            <header class="flex flex-col lg:flex-row justify-between items-start lg:items-center mb-8 gap-6">
+                <div class="flex items-center gap-4">
+                    <img id="headerLogo" src="" class="w-10 h-10 object-contain" alt="Logo">
                     <div>
-                        <h1 id="headerTitle" class="text-3xl font-black text-white tracking-tighter uppercase"></h1>
-                        <p class="text-slate-500 text-[10px] font-bold uppercase tracking-[0.2em]">Infrastructure Intelligence</p>
+                        <h1 id="headerTitle" class="text-2xl font-black text-white tracking-tighter uppercase"></h1>
+                        <p class="text-slate-500 text-[9px] font-bold uppercase tracking-[0.2em]">Global Intelligence Network</p>
                     </div>
                 </div>
-                <div class="flex flex-wrap items-center gap-3 w-full lg:w-auto">
-                    <button onclick="toggleView('config')" class="p-2.5 bg-slate-800 hover:bg-slate-700 text-slate-400 rounded-xl border border-slate-700 transition-all">
+                
+                <div class="flex items-center gap-6 bg-slate-900/50 p-3 rounded-2xl border border-slate-800">
+                    <div class="text-center px-4 border-r border-slate-800">
+                        <p class="text-[9px] font-black text-slate-500 uppercase tracking-widest">Nodes</p>
+                        <p id="statNodes" class="text-lg font-black text-white">-</p>
+                    </div>
+                    <div class="text-center px-4 border-r border-slate-800">
+                        <p class="text-[9px] font-black text-slate-500 uppercase tracking-widest">Fleet</p>
+                        <p id="statFleet" class="text-lg font-black text-blue-400">-</p>
+                    </div>
+                    <div class="text-center px-4">
+                        <p class="text-[9px] font-black text-slate-500 uppercase tracking-widest text-amber-500">Priority</p>
+                        <p id="statPriority" class="text-lg font-black text-amber-500">-</p>
+                    </div>
+                </div>
+
+                <div class="flex items-center gap-3 w-full lg:w-auto">
+                    <button onclick="toggleView('config')" class="p-2.5 bg-slate-800 hover:bg-slate-700 text-slate-400 rounded-xl border border-slate-700 transition-all" title="Settings">
                         <i class="fas fa-cog"></i>
                     </button>
                     <button id="viewArchiveBtn" onclick="toggleArchiveView()" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-bold transition-all border border-slate-700">
-                        <i class="fas fa-archive mr-2"></i> Archives
+                        <i class="fas fa-archive"></i>
                     </button>
                     <button onclick="initPush()" class="px-4 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold shadow-lg shadow-blue-500/20">
-                        <i class="fas fa-bell mr-2"></i> Alerts
+                        <i class="fas fa-bell"></i>
                     </button>
-                    <input type="text" id="globalFilter" placeholder="Global Search..." class="bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 min-w-[180px]">
+                    <input type="text" id="globalFilter" placeholder="Search Fleet..." class="bg-slate-900 border border-slate-800 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 min-w-[200px]">
                 </div>
             </header>
 
-            <!-- Views -->
+            <!-- Main Dashboard -->
             <div id="mainView" class="view-section">
-                <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-8" id="nodeGrid"></div>
+                <div class="flex flex-col gap-3" id="nodeList"></div>
             </div>
 
+            <!-- Discovery Explorer -->
             <div id="explorerView" class="view-section hidden">
-                <div class="flex justify-between items-center mb-8 bg-slate-800/50 p-4 rounded-2xl border border-slate-800">
+                <div class="flex justify-between items-center mb-6 bg-slate-800/50 p-4 rounded-2xl border border-slate-800">
                     <button onclick="toggleView('main')" class="flex items-center gap-2 text-slate-400 hover:text-white transition-colors font-bold text-xs uppercase tracking-widest">
-                        <i class="fas fa-chevron-left text-[10px]"></i> Fleet Overview
+                        <i class="fas fa-chevron-left text-[10px]"></i> Fleet Dashboard
                     </button>
                     <label class="flex items-center gap-2 text-[10px] font-black text-slate-500 cursor-pointer uppercase tracking-widest">
                         <input type="checkbox" id="showOnlyImportant" class="rounded border-slate-800 bg-slate-900 text-amber-500 focus:ring-amber-500">
-                        Priority Only
+                        Show Priority Only
                     </label>
                 </div>
                 <div id="explorerContent"></div>
             </div>
 
+            <!-- Config View -->
             <div id="configView" class="view-section hidden">
-                <button onclick="toggleView('main')" class="mb-8 text-slate-400 hover:text-white font-bold text-xs uppercase tracking-widest">
+                <button onclick="toggleView('main')" class="mb-6 text-slate-400 hover:text-white font-bold text-xs uppercase tracking-widest">
                     <i class="fas fa-arrow-left mr-2"></i> Back
                 </button>
-                <div class="max-w-2xl bg-slate-800 border border-slate-700 rounded-3xl p-8 shadow-2xl">
-                    <h2 class="text-2xl font-black text-white mb-8">SYSTEM CONFIGURATION</h2>
-                    <div class="space-y-6">
+                <div class="max-w-xl bg-slate-800 border border-slate-700 rounded-3xl p-8 shadow-2xl">
+                    <h2 class="text-xl font-black text-white mb-6 uppercase">System Preferences</h2>
+                    <div class="space-y-5">
                         <div>
-                            <label class="block text-[10px] font-black text-slate-500 uppercase mb-2">Company Name / Hub Title</label>
+                            <label class="block text-[10px] font-black text-slate-500 uppercase mb-2">Network Name</label>
                             <input type="text" id="cfgTitle" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-sm text-white focus:ring-2 focus:ring-blue-500">
                         </div>
                         <div>
-                            <label class="block text-[10px] font-black text-slate-500 uppercase mb-2">Logo URL (PNG/SVG Preferred)</label>
+                            <label class="block text-[10px] font-black text-slate-500 uppercase mb-2">Interface Logo URL</label>
                             <input type="text" id="cfgLogo" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-sm text-white focus:ring-2 focus:ring-blue-500">
                         </div>
-                        <button onclick="saveConfig()" class="w-full py-4 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold transition-all shadow-xl shadow-blue-500/20 uppercase tracking-widest text-xs mt-4">
-                            Apply Changes
+                        <button onclick="saveConfig()" class="w-full py-3.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold transition-all uppercase tracking-widest text-[10px] mt-2">
+                            Update Environment
                         </button>
                     </div>
                 </div>
@@ -290,7 +301,7 @@ function generateUI() {
                     const reg = await navigator.serviceWorker.ready;
                     const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(VAPID_KEY) });
                     await fetch('/api/register-token', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ subscription: sub }) });
-                    alert("Alerts Enabled.");
+                    alert("System Alerts Activated.");
                 } catch (e) { console.error(e); }
             }
 
@@ -300,9 +311,20 @@ function generateUI() {
                     const json = await res.json();
                     currentData = json.nodes;
                     currentSettings = json.settings;
+                    updateDashboardStats();
                     updateBranding();
                     render();
                 } catch (e) {}
+            }
+
+            function updateDashboardStats() {
+                const totalNodes = currentData.filter(n => !n.isArchived).length;
+                const totalFleet = currentData.filter(n => !n.isArchived).reduce((acc, n) => acc + (n.scannedDevices?.length || 0), 0);
+                const totalPriority = currentData.filter(n => !n.isArchived).reduce((acc, n) => acc + (n.scannedDevices?.filter(d => d.isImportant).length || 0), 0);
+                
+                document.getElementById('statNodes').innerText = totalNodes;
+                document.getElementById('statFleet').innerText = totalFleet;
+                document.getElementById('statPriority').innerText = totalPriority;
             }
 
             function updateBranding() {
@@ -334,62 +356,68 @@ function generateUI() {
             function render() {
                 const filter = (document.getElementById('globalFilter')?.value || "").toLowerCase();
                 if (activeNodeId) renderExplorer(filter);
-                else renderGrid(filter);
+                else renderList(filter);
             }
 
-            function renderGrid(filter) {
-                const grid = document.getElementById('nodeGrid');
-                const nodes = currentData.filter(n => {
+            function renderList(filter) {
+                const list = document.getElementById('nodeList');
+                if(!list) return;
+                const filtered = currentData.filter(n => {
                     const match = (n.hostname || "").toLowerCase().includes(filter) || (n.location || "").toLowerCase().includes(filter);
                     return match && (!!n.isArchived === showArchived);
-                });
+                }).sort((a, b) => (b.isOnline ? 1 : 0) - (a.isOnline ? 1 : 0));
 
-                grid.innerHTML = nodes.map(n => {
-                    const statusClass = n.isOnline ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 'bg-red-500/10 text-red-400 border-red-500/20';
-                    const importantDevices = (n.scannedDevices || []).filter(d => d.isImportant).slice(0, 3);
+                if (filtered.length === 0) {
+                    list.innerHTML = \`<div class="py-12 text-center text-slate-600 italic border border-dashed border-slate-800 rounded-3xl">No \${showArchived ? 'archived' : 'active'} telemetry units reporting.</div>\`;
+                    return;
+                }
+
+                list.innerHTML = filtered.map(n => {
+                    const statusColor = n.isOnline ? 'bg-emerald-500' : 'bg-red-500';
+                    const priorityCount = (n.scannedDevices || []).filter(d => d.isImportant).length;
+                    const siteName = n.location || n.hostname || 'Undefined Site';
+                    const hostLabel = n.location ? n.hostname : 'System Agent';
                     
                     return \`
-                    <div class="node-card rounded-[2.5rem] p-8 transition-all group relative overflow-hidden shadow-2xl">
-                        <div class="flex justify-between items-start mb-8">
-                            <div class="p-4 bg-blue-500/10 rounded-2xl border border-blue-500/20 shadow-inner">
-                                <i class="fas fa-broadcast-tower text-blue-400 text-2xl"></i>
+                    <div class="node-row rounded-2xl p-4 flex flex-col md:flex-row items-center gap-6">
+                        <!-- Status Pillar -->
+                        <div class="flex items-center gap-4 min-w-[140px]">
+                            <div class="w-3 h-3 rounded-full \${statusColor} shadow-[0_0_10px_rgba(0,0,0,0.5)]"></div>
+                            <span class="text-[10px] font-black uppercase tracking-widest \${n.isOnline ? 'text-emerald-400' : 'text-red-400'}">
+                                \${n.isOnline ? 'Active' : 'Offline'}
+                            </span>
+                        </div>
+
+                        <!-- Site Info -->
+                        <div class="flex-1 min-w-0">
+                            <h3 class="text-xl font-black text-white uppercase tracking-tighter truncate">\${siteName}</h3>
+                            <p class="text-[10px] text-slate-500 font-bold uppercase tracking-widest truncate opacity-80">\${hostLabel} // \${n.ip || '0.0.0.0'}</p>
+                        </div>
+
+                        <!-- Metrics -->
+                        <div class="flex items-center gap-4">
+                            <div class="flex flex-col items-center min-w-[80px]">
+                                <span class="text-[8px] font-black text-slate-500 uppercase mb-0.5">Fleet</span>
+                                <span class="text-sm font-black text-blue-400 font-mono">\${n.scannedDevices.length}</span>
                             </div>
-                            <div class="flex items-center gap-3">
-                                <button onclick="archiveNode('\${n.id}', \${!n.isArchived})" class="p-2 text-slate-600 hover:text-white transition-colors"><i class="fas fa-archive text-xs"></i></button>
-                                <span class="px-3 py-1.5 rounded-xl text-[9px] font-black uppercase \${statusClass}">\${n.isOnline ? 'Online' : 'Offline'}</span>
-                                <button onclick="launchExplorer('\${n.id}')" class="p-2.5 bg-slate-800 text-blue-400 rounded-xl hover:bg-blue-500 hover:text-white transition-all">
-                                    <i class="fas fa-search-plus"></i>
-                                </button>
+                            <div class="flex flex-col items-center min-w-[80px]">
+                                <span class="text-[8px] font-black text-slate-500 uppercase mb-0.5">Priority</span>
+                                <span class="text-sm font-black text-amber-500 font-mono">\${priorityCount}</span>
+                            </div>
+                            <div class="flex flex-col items-center min-w-[80px]">
+                                <span class="text-[8px] font-black text-slate-500 uppercase mb-0.5">Storage</span>
+                                <span class="text-sm font-black text-slate-300 font-mono">\${n.disk ? n.disk.split(' ')[0] : 'N/A'}</span>
                             </div>
                         </div>
 
-                        <h3 class="text-3xl font-black text-white mb-1 uppercase tracking-tighter">\${n.hostname}</h3>
-                        <p class="text-xs text-slate-500 font-bold uppercase tracking-widest mb-8 opacity-80">\${n.location || 'Remote Site'}</p>
-
-                        <div class="grid grid-cols-2 gap-4 mb-8">
-                            <div class="bg-black/20 p-4 rounded-2xl border border-slate-700/50">
-                                <span class="text-[9px] font-black text-slate-500 block mb-1 tracking-widest">FLEET COUNT</span>
-                                <span class="text-3xl font-black text-blue-400">\${n.scannedDevices.length}</span>
-                            </div>
-                            <div class="bg-black/20 p-4 rounded-2xl border border-slate-700/50">
-                                <span class="text-[9px] font-black text-slate-500 block mb-1 tracking-widest">DISK LOAD</span>
-                                <span class="text-lg font-black text-slate-300">\${n.disk ? n.disk.split(' ')[0] : 'N/A'}</span>
-                            </div>
-                        </div>
-
-                        <div class="space-y-3">
-                            <span class="text-[9px] font-black text-slate-500 block mb-2 tracking-widest uppercase">Priority Assets</span>
-                            \${importantDevices.length === 0 ? '<p class="text-[10px] text-slate-600 italic">No assets marked for priority</p>' : importantDevices.map(d => \`
-                                <div class="priority-item bg-slate-800/80 p-3 rounded-xl flex justify-between items-center">
-                                    <div>
-                                        <p class="text-[11px] font-black text-white">\${d.name || d.ip}</p>
-                                        <p class="text-[9px] text-slate-500 font-mono">\${d.ip}</p>
-                                    </div>
-                                    <div class="text-right">
-                                        <p class="text-[8px] font-black text-blue-500 uppercase">\${new Date(d.lastSeen).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</p>
-                                    </div>
-                                </div>
-                            \`).join('')}
+                        <!-- Actions -->
+                        <div class="flex items-center gap-2 ml-4">
+                            <button onclick="archiveNode('\${n.id}', \${!n.isArchived})" class="p-2.5 text-slate-600 hover:text-white transition-colors" title="Archive">
+                                <i class="fas fa-archive text-xs"></i>
+                            </button>
+                            <button onclick="launchExplorer('\${n.id}')" class="px-5 py-2.5 bg-slate-800 hover:bg-blue-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest transition-all border border-slate-700 hover:border-blue-500">
+                                EXPLORE
+                            </button>
                         </div>
                     </div>\`;
                 }).join("");
@@ -407,26 +435,26 @@ function generateUI() {
                 }).sort((a,b) => (b.isImportant?1:0) - (a.isImportant?1:0));
 
                 grid.innerHTML = \`
-                    <div class="bg-slate-800 border border-slate-700 rounded-3xl p-10 mb-8 flex justify-between items-center shadow-inner">
+                    <div class="bg-slate-800 border border-slate-700 rounded-3xl p-8 mb-6 flex justify-between items-center shadow-inner">
                         <div>
-                            <h2 class="text-4xl font-black text-white uppercase tracking-tighter mb-1">\${node.hostname}</h2>
-                            <p class="text-blue-500 text-xs font-black uppercase tracking-[0.3em]">\${node.location} Discovery</p>
+                            <h2 class="text-3xl font-black text-white uppercase tracking-tighter mb-1">\${node.location || node.hostname}</h2>
+                            <p class="text-blue-500 text-[10px] font-black uppercase tracking-[0.3em] opacity-80">\${node.hostname} Subnet Discovery</p>
                         </div>
-                        <div class="text-[10px] bg-slate-900 text-slate-400 px-5 py-3 rounded-xl border border-slate-800 font-bold uppercase tracking-widest">Sync: \${new Date(node.lastSeen).toLocaleTimeString()}</div>
+                        <div class="text-[9px] bg-slate-900 text-slate-400 px-4 py-2 rounded-xl border border-slate-800 font-bold uppercase tracking-widest">Update: \${new Date(node.lastSeen).toLocaleTimeString()}</div>
                     </div>
-                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                        \${devices.map(c => \`
-                            <div class="bg-slate-800/80 border border-slate-700 p-6 rounded-[1.5rem] shadow-xl relative \${c.isImportant ? 'important-glow' : ''}">
-                                <div class="flex justify-between items-start mb-5">
-                                    <span class="text-blue-400 font-mono font-black text-xs">\${c.ip}</span>
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                        \${devices.length === 0 ? '<div class="col-span-full py-20 text-center text-slate-600 italic">No discovery matches found.</div>' : devices.map(c => \`
+                            <div class="bg-slate-800/80 border border-slate-700 p-5 rounded-2xl shadow-lg relative \${c.isImportant ? 'important-glow' : ''}">
+                                <div class="flex justify-between items-start mb-4">
+                                    <span class="text-blue-400 font-mono font-black text-[10px]">\${c.ip}</span>
                                     <div class="flex gap-1">
                                         <button onclick="toggleImportant('\${node.id}', '\${c.ip}')" class="p-1.5 \${c.isImportant ? 'text-amber-400' : 'text-slate-600 hover:text-white'} transition-colors"><i class="fas fa-star text-xs"></i></button>
                                         <button onclick="deleteClient('\${node.id}', '\${c.ip}')" class="p-1.5 text-slate-600 hover:text-red-500 transition-colors"><i class="fas fa-trash-alt text-xs"></i></button>
                                     </div>
                                 </div>
-                                <h4 class="text-white font-black mb-1 truncate text-base uppercase tracking-tight">\${c.name}</h4>
-                                <p class="text-[10px] text-slate-500 mb-6 truncate font-bold uppercase tracking-widest opacity-60">\${c.description}</p>
-                                <div class="flex justify-between items-center text-[9px] font-black text-slate-600 uppercase pt-4 border-t border-slate-700/50">
+                                <h4 class="text-white font-black mb-1 truncate text-sm uppercase tracking-tight">\${c.name}</h4>
+                                <p class="text-[9px] text-slate-500 mb-5 truncate font-bold uppercase tracking-widest opacity-60">\${c.description}</p>
+                                <div class="flex justify-between items-center text-[8px] font-black text-slate-600 uppercase pt-3 border-t border-slate-700/50">
                                     <span>Sync: \${new Date(c.lastSeen).toLocaleTimeString()}</span>
                                     \${c.isImportant ? '<span class="text-amber-500 tracking-widest font-black">PRIORITY</span>' : '<span class="tracking-widest">GENERIC</span>'}
                                 </div>
