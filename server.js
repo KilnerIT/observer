@@ -22,38 +22,37 @@ const OFFLINE_THRESHOLD_MS = 60000;
 const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
 
 /**
- * FIREBASE CONFIGURATION
- * When running in the Canvas preview, the environment provides the config.
- * When running on your local Linux server, replace the 'null' below with your 
- * actual Firebase config object from the Firebase Console.
+ * FIREBASE CONFIGURATION (CRITICAL)
+ * 1. Go to Firebase Console > Project Settings > General.
+ * 2. Scroll to "Your apps" > "Web apps" (Create one if missing).
+ * 3. Copy the 'firebaseConfig' object and paste it below.
  */
 let firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
 
-if (!firebaseConfig || !firebaseConfig.apiKey) {
-    // PASTE YOUR FIREBASE CONFIG HERE FOR LOCAL LINUX EXECUTION:
+if (!firebaseConfig || !firebaseConfig.apiKey || firebaseConfig.apiKey === "YOUR_API_KEY") {
     firebaseConfig = {
-        apiKey: "YOUR_API_KEY",
+        apiKey: "YOUR_API_KEY", // <--- REPLACE THIS
         authDomain: "YOUR_PROJECT.firebaseapp.com",
         projectId: "YOUR_PROJECT_ID",
         storageBucket: "YOUR_PROJECT.appspot.com",
         messagingSenderId: "YOUR_SENDER_ID",
         appId: "YOUR_APP_ID"
     };
-    
-    // Log a reminder for the user
-    if (firebaseConfig.apiKey === "YOUR_API_KEY") {
-        console.warn("\n[WARN] Firebase Config is missing or empty.");
-        console.warn("Please edit server.js and paste your Firebase Web App credentials to enable persistence.\n");
-    }
 }
 
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'observer-default';
 const initialToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
 // Initialize Firebase
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
+// We wrap this in a try-block to prevent the server from crashing if keys are still missing
+let app, auth, db;
+try {
+    app = initializeApp(firebaseConfig);
+    auth = getAuth(app);
+    db = getFirestore(app);
+} catch (e) {
+    console.error("\n[CRITICAL] Firebase failed to initialize. Did you enter your API key?");
+}
 
 // State: Local cache for fast dashboard serving
 const clients = new Map();
@@ -63,6 +62,7 @@ let currentUser = null;
  * Auth Logic - MANDATORY RULE 3
  */
 const initAuth = async () => {
+    if (!auth) return;
     try {
         if (initialToken) {
             await signInWithCustomToken(auth, initialToken);
@@ -70,35 +70,42 @@ const initAuth = async () => {
             await signInAnonymously(auth);
         }
     } catch (err) {
-        // If config is still dummy/invalid, this is where it will fail
-        console.error("[AUTH] Initialization failed. Check your Firebase credentials in server.js:", err.message);
+        console.error("\n[AUTH ERROR] Could not sign in to Firebase.");
+        console.error("Reason:", err.message);
+        console.error("Check that 'Anonymous Authentication' is enabled in your Firebase Console.\n");
     }
 };
-
-onAuthStateChanged(auth, async (user) => {
-    currentUser = user;
-    if (user) {
-        console.log(`[AUTH] Authenticated as ${user.uid}`);
-        await loadPersistedClients(); // Load data from DB once auth is ready
-    }
-});
 
 /**
  * Load all clients from Firestore on startup
  */
 async function loadPersistedClients() {
-    if (!currentUser) return;
+    if (!currentUser || !db) return;
     console.log("[DB] Synchronizing state from cloud...");
     try {
         // Path: /artifacts/{appId}/public/data/{collectionName} - RULE 1
-        const querySnapshot = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'nodes'));
+        const nodesCol = collection(db, 'artifacts', appId, 'public', 'data', 'nodes');
+        const querySnapshot = await getDocs(nodesCol);
+        
         querySnapshot.forEach((doc) => {
             clients.set(doc.id, doc.data());
         });
-        console.log(`[DB] Restored ${clients.size} nodes from persistence.`);
+        
+        console.log(`[DB] Successfully restored ${clients.size} nodes from persistence.`);
     } catch (err) {
-        console.error("[DB] Failed to load nodes:", err.message);
+        console.error("[DB] Failed to load nodes from Firestore:", err.message);
     }
+}
+
+// Listen for Auth Changes to trigger data loading
+if (auth) {
+    onAuthStateChanged(auth, async (user) => {
+        currentUser = user;
+        if (user) {
+            console.log(`[AUTH] Session active for UID: ${user.uid}`);
+            await loadPersistedClients();
+        }
+    });
 }
 
 /**
@@ -113,6 +120,7 @@ function syncWithGithub() {
             console.log("[GIT] Server code is up to date.");
         } else {
             console.log("[GIT] Server updates downloaded successfully!");
+            // Note: If keys were in this file, git pull might have overwritten them!
         }
     } catch (error) {
         console.log("[GIT] Auto-update skipped (not a git repo).");
@@ -145,7 +153,7 @@ const server = http.createServer((req, res) => {
                 clients.set(data.id, nodeData);
 
                 // Persist to Firestore - RULE 1
-                if (currentUser) {
+                if (currentUser && db) {
                     const nodeRef = doc(db, 'artifacts', appId, 'public', 'data', 'nodes', data.id);
                     setDoc(nodeRef, nodeData).catch(err => console.error("[DB] Save failed:", err.message));
                 }
@@ -204,7 +212,7 @@ function generateDashboardHTML() {
                 </div>
                 <div class="flex items-center gap-3 bg-gray-800/50 p-3 rounded-xl border border-gray-700">
                     <div class="w-2.5 h-2.5 rounded-full bg-blue-500 animate-pulse"></div>
-                    <span class="text-xs font-mono text-gray-300 tracking-tighter">CLOUD SYNC ACTIVE : PORT ${PORT}</span>
+                    <span class="text-xs font-mono text-gray-300 tracking-tighter uppercase">Cloud Persistence Sync Active</span>
                 </div>
             </header>
 
