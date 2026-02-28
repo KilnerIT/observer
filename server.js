@@ -4,12 +4,14 @@
  * - REST API for heartbeats & SNMP data.
  * - Persistent Storage: Saves node data to Firestore.
  * - Auto-sync with GitHub on startup.
- * - Advanced Infrastructure Dashboard.
+ * - Runtime Config: Loads credentials from a local config.json.
  */
 
 const http = require('http');
 const { execSync } = require('child_process');
 const os = require('os');
+const fs = require('fs');
+const path = require('path');
 
 // Firebase Requirements (Standard Node.js Compatibility)
 const { initializeApp } = require('firebase/app');
@@ -20,38 +22,50 @@ const { getFirestore, doc, setDoc, collection, getDocs } = require('firebase/fir
 const PORT = 8080; 
 const OFFLINE_THRESHOLD_MS = 60000; 
 const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
+const CONFIG_PATH = path.join(__dirname, 'config.json');
 
 /**
- * FIREBASE CONFIGURATION (CRITICAL)
- * 1. Go to Firebase Console > Project Settings > General.
- * 2. Scroll to "Your apps" > "Web apps" (Create one if missing).
- * 3. Copy the 'firebaseConfig' object and paste it below.
+ * FIREBASE CONFIGURATION LOAD (RUNTIME)
+ * This logic attempts to load from the environment (Canvas) first,
+ * then checks for a local 'config.json' file.
  */
-let firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+let firebaseConfig = null;
 
-if (!firebaseConfig || !firebaseConfig.apiKey || firebaseConfig.apiKey === "YOUR_API_KEY") {
-    firebaseConfig = {
-        apiKey: "YOUR_API_KEY", // <--- REPLACE THIS
-        authDomain: "YOUR_PROJECT.firebaseapp.com",
-        projectId: "YOUR_PROJECT_ID",
-        storageBucket: "YOUR_PROJECT.appspot.com",
-        messagingSenderId: "YOUR_SENDER_ID",
-        appId: "YOUR_APP_ID"
-    };
+// 1. Check environment variable (Canvas context)
+if (typeof __firebase_config !== 'undefined') {
+    firebaseConfig = JSON.parse(__firebase_config);
+} 
+// 2. Check for local config.json (Local execution context)
+else if (fs.existsSync(CONFIG_PATH)) {
+    try {
+        const configData = fs.readFileSync(CONFIG_PATH, 'utf8');
+        firebaseConfig = JSON.parse(configData);
+        console.log("[CONFIG] Successfully loaded Firebase credentials from config.json");
+    } catch (err) {
+        console.error("[CONFIG] Error parsing config.json:", err.message);
+    }
+}
+
+if (!firebaseConfig || !firebaseConfig.apiKey) {
+    console.error("\n[CRITICAL] No Firebase configuration found!");
+    console.error("Please create a 'config.json' file in the server directory with your credentials.");
+    console.error("This is required for persistent storage to work.\n");
+    // We allow the server to start, but DB operations will fail gracefully
 }
 
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'observer-default';
 const initialToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
 // Initialize Firebase
-// We wrap this in a try-block to prevent the server from crashing if keys are still missing
 let app, auth, db;
-try {
-    app = initializeApp(firebaseConfig);
-    auth = getAuth(app);
-    db = getFirestore(app);
-} catch (e) {
-    console.error("\n[CRITICAL] Firebase failed to initialize. Did you enter your API key?");
+if (firebaseConfig) {
+    try {
+        app = initializeApp(firebaseConfig);
+        auth = getAuth(app);
+        db = getFirestore(app);
+    } catch (e) {
+        console.error("\n[CRITICAL] Firebase failed to initialize. Check your config.json syntax.");
+    }
 }
 
 // State: Local cache for fast dashboard serving
@@ -59,7 +73,7 @@ const clients = new Map();
 let currentUser = null;
 
 /**
- * Auth Logic - MANDATORY RULE 3
+ * Auth Logic
  */
 const initAuth = async () => {
     if (!auth) return;
@@ -72,7 +86,7 @@ const initAuth = async () => {
     } catch (err) {
         console.error("\n[AUTH ERROR] Could not sign in to Firebase.");
         console.error("Reason:", err.message);
-        console.error("Check that 'Anonymous Authentication' is enabled in your Firebase Console.\n");
+        console.error("Action Required: Ensure 'Anonymous Authentication' is enabled in your Firebase Console.\n");
     }
 };
 
@@ -83,7 +97,6 @@ async function loadPersistedClients() {
     if (!currentUser || !db) return;
     console.log("[DB] Synchronizing state from cloud...");
     try {
-        // Path: /artifacts/{appId}/public/data/{collectionName} - RULE 1
         const nodesCol = collection(db, 'artifacts', appId, 'public', 'data', 'nodes');
         const querySnapshot = await getDocs(nodesCol);
         
@@ -97,7 +110,7 @@ async function loadPersistedClients() {
     }
 }
 
-// Listen for Auth Changes to trigger data loading
+// Listen for Auth Changes
 if (auth) {
     onAuthStateChanged(auth, async (user) => {
         currentUser = user;
@@ -120,7 +133,6 @@ function syncWithGithub() {
             console.log("[GIT] Server code is up to date.");
         } else {
             console.log("[GIT] Server updates downloaded successfully!");
-            // Note: If keys were in this file, git pull might have overwritten them!
         }
     } catch (error) {
         console.log("[GIT] Auto-update skipped (not a git repo).");
@@ -149,10 +161,8 @@ const server = http.createServer((req, res) => {
                     ip: req.socket.remoteAddress
                 };
 
-                // Update local memory
                 clients.set(data.id, nodeData);
 
-                // Persist to Firestore - RULE 1
                 if (currentUser && db) {
                     const nodeRef = doc(db, 'artifacts', appId, 'public', 'data', 'nodes', data.id);
                     setDoc(nodeRef, nodeData).catch(err => console.error("[DB] Save failed:", err.message));
@@ -215,12 +225,8 @@ function generateDashboardHTML() {
                     <span class="text-xs font-mono text-gray-300 tracking-tighter uppercase">Cloud Persistence Sync Active</span>
                 </div>
             </header>
-
-            <div class="grid grid-cols-1 xl:grid-cols-2 gap-8" id="client-grid">
-                <!-- Node Cards -->
-            </div>
+            <div class="grid grid-cols-1 xl:grid-cols-2 gap-8" id="client-grid"></div>
         </div>
-
         <script>
             function formatUptime(seconds) {
                 if (!seconds) return '0s';
@@ -229,22 +235,18 @@ function generateDashboardHTML() {
                 const mins = Math.floor((seconds % 3600) / 60);
                 return \`\${days}d \${hrs}h \${mins}m\`;
             }
-
             async function refreshStatus() {
                 try {
                     const response = await fetch('/api/status');
                     const data = await response.json();
                     const grid = document.getElementById('client-grid');
-                    
                     if (data.length === 0) {
                         grid.innerHTML = '<div class="col-span-full text-center py-32 text-gray-600 border-2 border-dashed border-gray-800 rounded-3xl text-xl italic font-medium">Awaiting node check-in...</div>';
                         return;
                     }
-
                     grid.innerHTML = data.map(node => {
                         const isOnline = node.status === 'Online';
                         const scanCount = node.scannedDevices ? node.scannedDevices.length : 0;
-                        
                         return \`
                             <div class="bg-gray-900/40 backdrop-blur-md border \${isOnline ? 'border-gray-800' : 'border-red-900/50'} rounded-3xl p-6 shadow-2xl relative group transition-all duration-500">
                                 <div class="flex justify-between items-start mb-8">
@@ -269,7 +271,6 @@ function generateDashboardHTML() {
                                         </p>
                                     </div>
                                 </div>
-
                                 <div class="grid grid-cols-2 md:grid-cols-3 gap-4 mb-8 text-center">
                                     <div class="bg-black/20 p-4 rounded-2xl border border-gray-800">
                                         <p class="text-[10px] uppercase text-gray-500 font-bold mb-1 tracking-widest">Uptime</p>
@@ -284,13 +285,11 @@ function generateDashboardHTML() {
                                         <p class="text-amber-400 font-mono font-bold text-xs truncate">\${node.ip.replace('::ffff:', '')}</p>
                                     </div>
                                 </div>
-
                                 <div class="bg-gray-800/30 rounded-3xl p-5 border border-gray-700/50">
                                     <h4 class="text-xs font-bold uppercase text-gray-400 mb-4 flex items-center gap-2">
                                         <svg class="w-4 h-4 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
                                         Network Inventory (\${scanCount})
                                     </h4>
-                                    
                                     <div class="space-y-2 max-h-48 overflow-y-auto custom-scrollbar pr-1">
                                         \${scanCount > 0 
                                             ? node.scannedDevices.map(dev => \`
@@ -314,7 +313,6 @@ function generateDashboardHTML() {
                     }).join('');
                 } catch (err) { console.error('Dashboard Error:', err); }
             }
-
             setInterval(refreshStatus, 3000);
             refreshStatus();
         </script>
