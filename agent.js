@@ -1,10 +1,11 @@
 /**
- * Observer Node Agent v1.5.3
+ * Observer Node Agent v1.6.0
  * Features:
  * - Automated Nmap Service Discovery (-sV)
  * - Hardware Fingerprinting (Ports, Service versions)
  * - Secure HTTPS communication for Render Cloud
- * - Cross-Platform Metric Collection
+ * - Location Tagging for Node Identification
+ * - Support for 'Important' client status tracking
  */
 
 const https = require('https');
@@ -13,11 +14,15 @@ const { exec, execSync } = require('child_process');
 const crypto = require('crypto');
 
 // --- CONFIGURATION ---
-const VERSION = '1.5.3';
+const VERSION = '1.6.0';
 const SERVER_URL = 'https://observer-sxv0.onrender.com/api/heartbeat';
 const HEARTBEAT_INTERVAL = 30000;   // 30 seconds for health checks
 const SCAN_INTERVAL = 300000;      // 5 minutes for full network scans
 const VERBOSE = true; 
+
+// LOCATION TAG: Set this via environment variable 'OBSERVER_LOCATION'
+// Example: export OBSERVER_LOCATION="London DataCenter"
+const LOCATION = process.env.OBSERVER_LOCATION || 'Remote Site';
 
 const clientId = crypto.createHash('md5').update(os.hostname()).digest('hex').substring(0, 8);
 
@@ -55,7 +60,7 @@ function performDiscovery() {
     isScanning = true;
 
     const targetSubnet = getLocalSubnet();
-    log(`Starting discovery sweep on ${targetSubnet}...`, "NMAP");
+    log(`Starting discovery sweep on ${targetSubnet} (${LOCATION})...`, "NMAP");
 
     // Phase 1: Ping scan to find live hosts
     exec(`nmap -sn ${targetSubnet} -oG -`, (err, stdout) => {
@@ -80,14 +85,14 @@ function performDiscovery() {
 
         log(`Found ${hosts.length} live hosts. Fingerprinting services...`, "NMAP");
         
-        // Phase 2: Service version detection on top 10 hosts
+        // Phase 2: Service version detection
         const scanTargets = hosts.slice(0, 10).join(' ');
         exec(`nmap -sV -F --version-light ${scanTargets} -oX -`, (sErr, sStdout) => {
             const results = [];
             
             try {
                 const hostBlocks = sStdout.split('<host ');
-                hostBlocks.shift(); // Remove header
+                hostBlocks.shift(); 
 
                 hostBlocks.forEach(block => {
                     const ipMatch = block.match(/addr="([0-9.]+)"/);
@@ -113,9 +118,8 @@ function performDiscovery() {
 
             lastDiscoveryResults = results;
             isScanning = false;
-            log(`Discovery complete. Found ${results.length} fingerprinted devices.`, "OK");
+            log(`Discovery complete. reporting ${results.length} fingerprinted devices.`, "OK");
             
-            // Immediately send updated data
             sendHeartbeat();
         });
     });
@@ -139,6 +143,7 @@ function sendHeartbeat() {
         const payload = JSON.stringify({
             id: clientId,
             version: VERSION,
+            location: LOCATION,
             hostname: os.hostname(),
             os: os.type() + ' ' + os.release(),
             uptime: os.uptime(),
@@ -176,18 +181,16 @@ function sendHeartbeat() {
 // Initialization
 console.log("==========================================");
 console.log(` OBSERVER AGENT v${VERSION}`);
+console.log(` Location: ${LOCATION}`);
 console.log(` Node ID: ${clientId}`);
-console.log(` Target: ${SERVER_URL}`);
 console.log("==========================================");
 
-// Periodic Execution
 performDiscovery();
 sendHeartbeat();
 
 setInterval(sendHeartbeat, HEARTBEAT_INTERVAL);
 setInterval(performDiscovery, SCAN_INTERVAL);
 
-// Maintenance: Attempt git pull
 try {
     execSync('git pull origin main', { stdio: 'ignore' });
 } catch(e) {}
