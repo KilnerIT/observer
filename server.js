@@ -22,7 +22,7 @@ const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/aut
 const { getFirestore, doc, setDoc, getDoc, collection, getDocs, updateDoc } = require('firebase/firestore');
 
 // --- CONFIGURATION ---
-const VERSION = '1.5.1'; 
+const VERSION = '1.5.2'; // UI Hardening & Debugging
 const PORT = process.env.PORT || 8080; 
 const OFFLINE_THRESHOLD = 60000;
 const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
@@ -74,7 +74,7 @@ signInAnonymously(auth).catch(e => console.error("[AUTH] Error:", e.message));
 onAuthStateChanged(auth, async (user) => {
     currentUser = user;
     if (user) {
-        console.log(`[SYSTEM] Authenticated. Syncing from Firestore appId: ${appId}`);
+        console.log(`[SYSTEM] Authenticated UID: ${user.uid} | AppID: ${appId}`);
         try {
             const snapshot = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'nodes'));
             snapshot.forEach(d => {
@@ -252,7 +252,7 @@ function generateUI() {
                         <i class="fas fa-satellite-dish text-blue-500"></i> OBSERVER <span class="text-blue-500">CENTRAL</span>
                     </h1>
                     <div class="flex items-center gap-3 mt-1">
-                        <p class="text-slate-500 text-xs md:text-sm font-medium uppercase tracking-tight">Render Cloud Active</p>
+                        <p class="text-slate-500 text-xs md:text-sm font-medium uppercase tracking-tight">Cloud Environment Active</p>
                         <span class="text-[9px] bg-slate-800 text-blue-400 px-2 py-0.5 rounded font-bold border border-slate-700 tracking-wider uppercase">v${VERSION}</span>
                     </div>
                 </div>
@@ -263,7 +263,11 @@ function generateUI() {
                     <input type="text" id="globalFilter" placeholder="Filter..." class="flex-1 lg:flex-none bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 min-w-[150px]">
                 </div>
             </header>
-            <div id="mainView"><div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6" id="nodeGrid"></div></div>
+            <div id="mainView">
+                <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6" id="nodeGrid">
+                    <div class="col-span-full text-center py-20 opacity-50 italic">Connecting to API...</div>
+                </div>
+            </div>
             <div id="explorerView" class="hidden">
                 <button onclick="showMain()" class="mb-6 flex items-center gap-2 text-slate-400 hover:text-white transition-colors font-bold text-sm">
                     <i class="fas fa-arrow-left text-xs"></i> BACK TO FLEET
@@ -271,6 +275,8 @@ function generateUI() {
                 <div id="explorerContent"></div>
             </div>
         </div>
+        
+        <!-- iOS Popup -->
         <div id="iosModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-6 hidden">
             <div class="bg-slate-900 border border-slate-800 rounded-3xl p-8 max-sm w-full shadow-2xl">
                 <div class="text-center">
@@ -281,39 +287,98 @@ function generateUI() {
                 </div>
             </div>
         </div>
+
         <script>
+            console.log("Observer Central v${VERSION} Initializing...");
             let currentData = [];
             let activeNodeId = null;
             const VAPID_KEY = '${VAPID_PUBLIC_KEY}';
+
             function urlBase64ToUint8Array(base64String) {
-                const padding = '='.repeat((4 - base64String.length % 4) % 4);
-                const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
-                const rawData = window.atob(base64);
-                const outputArray = new Uint8Array(rawData.length);
-                for (let i = 0; i < rawData.length; ++i) { outputArray[i] = rawData.charCodeAt(i); }
-                return outputArray;
+                try {
+                    const padding = '='.repeat((4 - base64String.length % 4) % 4);
+                    const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+                    const rawData = window.atob(base64);
+                    const outputArray = new Uint8Array(rawData.length);
+                    for (let i = 0; i < rawData.length; ++i) { outputArray[i] = rawData.charCodeAt(i); }
+                    return outputArray;
+                } catch(e) { console.error("Base64 Conversion Failed:", e); return null; }
             }
-            if ('serviceWorker' in navigator) { window.addEventListener('load', () => { navigator.serviceWorker.register('/sw.js'); }); }
+
+            if ('serviceWorker' in navigator) {
+                navigator.serviceWorker.register('/sw.js').then(() => console.log("SW Registered")).catch(e => console.error("SW Error:", e));
+            }
+
             function isIos() { return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream; }
             function isStandalone() { return (window.navigator.standalone) || (window.matchMedia('(display-mode: standalone)').matches); }
             function closeIosModal() { document.getElementById('iosModal').classList.add('hidden'); }
+
             async function initMobilePush() {
                 const btn = document.getElementById('notifBtn');
                 if (isIos() && !isStandalone()) { document.getElementById('iosModal').classList.remove('hidden'); return; }
+                
                 try {
                     btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Subscribing...';
                     const registration = await navigator.serviceWorker.ready;
-                    const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(VAPID_KEY) });
-                    await fetch('/api/register-token', { method: 'POST', body: JSON.stringify({ subscription }) });
+                    
+                    const binaryKey = urlBase64ToUint8Array(VAPID_KEY);
+                    if (!binaryKey) throw new Error("Invalid VAPID Key");
+
+                    const subscription = await registration.pushManager.subscribe({
+                        userVisibleOnly: true,
+                        applicationServerKey: binaryKey
+                    });
+
+                    await fetch('/api/register-token', { 
+                        method: 'POST', 
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ subscription }) 
+                    });
+
                     btn.innerHTML = '<i class="fas fa-check-circle text-emerald-400"></i> Alerts Active';
-                } catch (e) { btn.innerHTML = '<i class="fas fa-mobile-alt"></i> Setup Failed'; }
+                    console.log("Push Subscription Successful");
+                } catch (e) { 
+                    console.error("Subscription Error:", e);
+                    btn.innerHTML = '<i class="fas fa-mobile-alt"></i> Setup Failed';
+                }
             }
-            async function fetchData() { try { const res = await fetch('/api/status'); currentData = await res.json(); render(); } catch (e) {} }
-            function render() { const filter = document.getElementById('globalFilter').value.toLowerCase(); if (activeNodeId) renderExplorer(filter); else renderGrid(filter); }
+
+            async function fetchData() {
+                try {
+                    const res = await fetch('/api/status');
+                    if (!res.ok) throw new Error("API Returned " + res.status);
+                    currentData = await res.json();
+                    console.log("Data Refreshed: Found " + currentData.length + " nodes");
+                    render();
+                } catch (e) { console.error("Fetch Error:", e); }
+            }
+
+            function render() {
+                const filter = (document.getElementById('globalFilter')?.value || "").toLowerCase();
+                if (activeNodeId) renderExplorer(filter);
+                else renderGrid(filter);
+            }
+
             function renderGrid(filter) {
                 const grid = document.getElementById('nodeGrid');
-                const filteredNodes = currentData.filter(n => n.hostname.toLowerCase().includes(filter) || n.id.toLowerCase().includes(filter));
-                grid.innerHTML = filteredNodes.map(node => \`
+                if (!grid) return;
+
+                const filteredNodes = currentData.filter(n => 
+                    (n.hostname || "").toLowerCase().includes(filter) || 
+                    (n.id || "").toLowerCase().includes(filter)
+                );
+
+                if (filteredNodes.length === 0) {
+                    grid.innerHTML = '<div class="col-span-full text-center py-32 opacity-30 italic">No nodes matching search or active nodes found.</div>';
+                    return;
+                }
+
+                grid.innerHTML = filteredNodes.map(node => {
+                    const nodeIp = (node.ip || "N/A").replace('::ffff:', '');
+                    const nodeDisk = node.disk ? node.disk.toString() : 'N/A';
+                    const endpointsCount = Array.isArray(node.scannedDevices) ? node.scannedDevices.length : 0;
+
+                    return \`
                     <div class="bg-slate-900/50 border \${node.isOnline ? 'border-slate-800' : 'border-red-900/30'} rounded-3xl p-6 transition-all group text-left shadow-lg">
                         <div class="flex justify-between items-start mb-6">
                             <div class="p-3 bg-blue-500/10 rounded-2xl"><i class="fas fa-server text-blue-400 text-xl"></i></div>
@@ -322,44 +387,75 @@ function generateUI() {
                                 \${node.version ? \`<span class="text-[8px] bg-slate-800 text-slate-500 px-1.5 py-0.5 rounded border border-slate-700 font-bold uppercase">v\${node.version}</span>\` : ''}
                             </div>
                         </div>
-                        <h3 class="text-xl font-bold text-white mb-0.5">\${node.hostname}</h3>
-                        <p class="text-[10px] text-slate-500 font-mono mb-6 uppercase tracking-widest opacity-60">NODE: \${node.id}</p>
+                        <h3 class="text-xl font-bold text-white mb-0.5 truncate">\${node.hostname || 'Unknown'}</h3>
+                        <p class="text-[10px] text-slate-500 font-mono mb-6 uppercase tracking-widest opacity-60 truncate">IP: \${nodeIp}</p>
                         <div class="grid grid-cols-2 gap-3 mb-6">
-                            <div class="bg-black/20 p-3 rounded-2xl border border-slate-800/50"><span class="text-[8px] uppercase text-slate-500 block font-black mb-1">Endpoints</span><span class="text-sm font-bold text-blue-400">\${node.scannedDevices.length} Hosts</span></div>
-                            <div class="bg-black/20 p-3 rounded-2xl border border-slate-800/50"><span class="text-[8px] uppercase text-slate-500 block font-black mb-1">Capacity</span><span class="text-sm font-bold text-slate-300">\${node.disk ? node.disk.split(' ')[0] : 'N/A'}</span></div>
+                            <div class="bg-black/20 p-3 rounded-2xl border border-slate-800/50">
+                                <span class="text-[8px] uppercase text-slate-500 block font-black mb-1">Endpoints</span>
+                                <span class="text-sm font-bold text-blue-400 font-mono">\${endpointsCount}</span>
+                            </div>
+                            <div class="bg-black/20 p-3 rounded-2xl border border-slate-800/50">
+                                <span class="text-[8px] uppercase text-slate-500 block font-black mb-1 font-mono tracking-tighter">Capacity</span>
+                                <span class="text-xs font-bold text-slate-300 truncate">\${nodeDisk.split(' ')[0]}</span>
+                            </div>
                         </div>
-                        <button onclick="launchExplorer('\${node.id}')" class="w-full py-3.5 bg-slate-800 hover:bg-blue-600 text-white rounded-2xl font-bold text-xs transition-all flex items-center justify-center gap-2 active:scale-95">NETWORK EXPLORER <i class="fas fa-chevron-right text-[8px]"></i></button>
-                    </div>\`).join('');
+                        <button onclick="launchExplorer('\${node.id}')" class="w-full py-3.5 bg-slate-800 hover:bg-blue-600 text-white rounded-2xl font-bold text-xs transition-all flex items-center justify-center gap-2 active:scale-95 shadow-md">NETWORK EXPLORER <i class="fas fa-chevron-right text-[8px]"></i></button>
+                    </div>\`;
+                }).join('');
             }
+
             function renderExplorer(filter) {
                 const node = currentData.find(n => n.id === activeNodeId);
                 const content = document.getElementById('explorerContent');
-                if (!node) return;
-                const clients = (node.scannedDevices || []).filter(c => c.ip.includes(filter) || (c.name || '').toLowerCase().includes(filter));
+                if (!node || !content) return;
+
+                const clients = (node.scannedDevices || []).filter(c => 
+                    (c.ip || "").includes(filter) || 
+                    (c.name || '').toLowerCase().includes(filter)
+                );
+
                 content.innerHTML = \`
                     <div class="bg-slate-900/50 border border-slate-800 rounded-3xl p-6 md:p-8 mb-6 text-left shadow-xl">
                         <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-                            <div><h2 class="text-2xl font-bold text-white uppercase tracking-tighter">\${node.hostname}</h2><p class="text-slate-500 text-xs font-medium uppercase tracking-widest mt-1">Subnet: \${node.ip.replace('::ffff:', '')}</p></div>
-                            <div class="text-[10px] bg-slate-800 text-slate-400 px-3 py-1.5 rounded-xl border border-slate-700 font-bold uppercase tracking-tighter">LAST SYNC: \${new Date(node.lastSeen).toLocaleTimeString()}</div>
+                            <div>
+                                <h2 class="text-2xl font-bold text-white uppercase tracking-tighter">\${node.hostname || 'Node'}</h2>
+                                <p class="text-slate-500 text-xs font-medium uppercase tracking-widest mt-1">Status: \${node.isOnline ? 'Reachable' : 'Unreachable'}</p>
+                            </div>
+                            <div class="text-[10px] bg-slate-800 text-slate-400 px-3 py-1.5 rounded-xl border border-slate-700 font-bold uppercase tracking-tighter">REFRESHED: \${new Date(node.lastSeen).toLocaleTimeString()}</div>
                         </div>
                     </div>
                     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                         \${clients.map(c => {
-                            const isOld = (Date.now() - c.lastSeen) > 300000;
+                            const isOld = (Date.now() - (c.lastSeen || 0)) > 300000;
                             return \`<div class="bg-slate-900 border border-slate-800 p-5 rounded-2xl hover:border-blue-500/50 transition-all group text-left shadow-md">
-                                <div class="flex justify-between items-start mb-3"><span class="text-blue-400 font-mono font-bold text-xs font-black">\${c.ip}</span><button onclick="deleteClient('\${node.id}', '\${c.ip}')" class="text-slate-600 hover:text-red-500 transition-colors p-1"><i class="fas fa-trash-alt text-xs"></i></button></div>
+                                <div class="flex justify-between items-start mb-3">
+                                    <span class="text-blue-400 font-mono font-bold text-xs font-black">\${c.ip || '0.0.0.0'}</span>
+                                    <button onclick="deleteClient('\${node.id}', '\${c.ip}')" class="text-slate-600 hover:text-red-500 transition-colors p-1"><i class="fas fa-trash-alt text-xs"></i></button>
+                                </div>
                                 <h4 class="text-white font-bold mb-1 truncate text-sm uppercase tracking-tight font-black">\${c.name || 'Generic Device'}</h4>
-                                <p class="text-[10px] text-slate-500 mb-4 truncate font-medium uppercase tracking-tighter font-bold">\${c.description || 'Discovery pending...'}</p>
-                                <div class="flex justify-between items-center text-[8px] font-bold text-slate-600 uppercase pt-3 border-t border-slate-800 tracking-tighter"><span>Seen: \${new Date(c.lastSeen).toLocaleTimeString()}</span><span class="\${isOld ? 'text-orange-500' : 'text-emerald-500'} font-black">\${isOld ? 'Stale' : 'Active'}</span></div>
+                                <p class="text-[10px] text-slate-500 mb-4 truncate font-medium uppercase tracking-tighter font-bold">\${c.description || 'Log pending...'}</p>
+                                <div class="flex justify-between items-center text-[8px] font-bold text-slate-600 uppercase pt-3 border-t border-slate-800 tracking-tighter">
+                                    <span>Sync: \${new Date(c.lastSeen || Date.now()).toLocaleTimeString()}</span>
+                                    <span class="\${isOld ? 'text-orange-500' : 'text-emerald-500'} font-black uppercase">\${isOld ? 'Stale' : 'Active'}</span>
+                                </div>
                             </div>\`).join('')}
                     </div>\`;
             }
+
             function launchExplorer(id) { activeNodeId = id; document.getElementById('mainView').classList.add('hidden'); document.getElementById('explorerView').classList.remove('hidden'); window.scrollTo(0,0); render(); }
             function showMain() { activeNodeId = null; document.getElementById('mainView').classList.remove('hidden'); document.getElementById('explorerView').classList.add('hidden'); render(); }
-            async function deleteClient(nodeId, clientIp) { if (!confirm(\`Remove \${clientIp}?\`)) return; try { await fetch('/api/delete-client', { method: 'POST', body: JSON.stringify({ nodeId, clientIp }) }); fetchData(); } catch(e) {} }
+            
+            async function deleteClient(nodeId, clientIp) { 
+                if (!confirm(\`Remove \${clientIp}?\`)) return; 
+                try { 
+                    await fetch('/api/delete-client', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ nodeId, clientIp }) }); 
+                    fetchData(); 
+                } catch(e) { console.error("API Error:", e); } 
+            }
+
             document.getElementById('globalFilter').addEventListener('input', render);
-            setInterval(fetchData, 5000);
             fetchData();
+            setInterval(fetchData, 5000);
         </script>
     </body>
     </html>
