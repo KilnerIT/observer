@@ -7,6 +7,7 @@
  * - Client Management (Delete/Prune devices)
  * - Real-time Filtering
  * - Version Tracking
+ * - Push Notification Alerts (Online/Offline status changes)
  */
 
 const http = require('http');
@@ -20,7 +21,7 @@ const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/aut
 const { getFirestore, doc, setDoc, getDoc, collection, getDocs, updateDoc } = require('firebase/firestore');
 
 // --- CONFIGURATION ---
-const VERSION = '1.2.0'; // Current Server Version
+const VERSION = '1.3.0'; // Updated for Notifications
 const PORT = 8080; 
 const OFFLINE_THRESHOLD = 60000;
 const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
@@ -37,7 +38,6 @@ if (fs.existsSync(CONFIG_PATH)) {
 
 if (!firebaseConfig) {
     console.error("[CRITICAL] No config.json found. Database operations will fail.");
-    // Fallback empty config to prevent crash on init, though it will fail auth
     firebaseConfig = { apiKey: "placeholder" };
 }
 
@@ -173,6 +173,9 @@ function generateUI() {
                     </div>
                 </div>
                 <div class="flex items-center gap-4">
+                    <button id="notifBtn" onclick="requestNotifPermission()" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-xs font-bold flex items-center gap-2 transition-all">
+                        <i class="fas fa-bell"></i> Enable Alerts
+                    </button>
                     <input type="text" id="globalFilter" placeholder="Filter nodes/clients..." 
                            class="bg-slate-900 border border-slate-800 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-64">
                     <div class="px-4 py-2 bg-slate-900 border border-slate-800 rounded-xl flex items-center gap-3 text-xs font-bold text-slate-400 uppercase tracking-widest">
@@ -198,15 +201,65 @@ function generateUI() {
         <script>
             let currentData = [];
             let activeNodeId = null;
+            let nodeStates = {}; // Track previous online/offline status locally
+
+            async function requestNotifPermission() {
+                const permission = await Notification.requestPermission();
+                updateNotifButton();
+                if (permission === "granted") {
+                    new Notification("Observer Central", { 
+                        body: "Push alerts are now active for node status changes.",
+                        icon: "https://cdn-icons-png.flaticon.com/512/564/564348.png"
+                    });
+                }
+            }
+
+            function updateNotifButton() {
+                const btn = document.getElementById('notifBtn');
+                if (Notification.permission === "granted") {
+                    btn.innerHTML = '<i class="fas fa-bell text-emerald-500"></i> Alerts Active';
+                    btn.classList.add('border-emerald-500/30', 'bg-emerald-500/5');
+                } else if (Notification.permission === "denied") {
+                    btn.innerHTML = '<i class="fas fa-bell-slash text-red-500"></i> Alerts Blocked';
+                    btn.disabled = true;
+                }
+            }
 
             async function fetchData() {
                 try {
                     const res = await fetch('/api/status');
-                    currentData = await res.json();
+                    const data = await res.json();
+                    
+                    // Check for status changes before updating currentData
+                    data.forEach(node => {
+                        const prevState = nodeStates[node.id];
+                        if (prevState !== undefined && prevState !== node.isOnline) {
+                            triggerStatusAlert(node);
+                        }
+                        nodeStates[node.id] = node.isOnline;
+                    });
+
+                    currentData = data;
                     render();
                 } catch (e) {
                     console.error("Refresh failed:", e);
                 }
+            }
+
+            function triggerStatusAlert(node) {
+                if (Notification.permission !== "granted") return;
+                
+                const title = node.isOnline ? "Node Online" : "Node Offline";
+                const body = node.isOnline 
+                    ? \`Node \${node.hostname} (\${node.id}) has reconnected to the grid.\` 
+                    : \`Node \${node.hostname} (\${node.id}) has stopped reporting heartbeats.\`;
+                
+                new Notification(title, {
+                    body: body,
+                    icon: node.isOnline 
+                        ? "https://cdn-icons-png.flaticon.com/512/190/190411.png" 
+                        : "https://cdn-icons-png.flaticon.com/512/595/595067.png"
+                });
             }
 
             function render() {
@@ -328,6 +381,7 @@ function generateUI() {
             }
 
             document.getElementById('globalFilter').addEventListener('input', render);
+            updateNotifButton();
             setInterval(fetchData, 5000);
             fetchData();
         </script>
@@ -336,6 +390,8 @@ function generateUI() {
     `;
 }
 
+// Startup Sequence
+// Note: syncWithGithub is handled locally on server start
 server.listen(PORT, () => {
     console.log(`Observer Hub v${VERSION} running at http://localhost:${PORT}`);
 });
