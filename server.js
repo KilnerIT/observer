@@ -21,11 +21,15 @@ const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/aut
 const { getFirestore, doc, setDoc, getDoc, collection, getDocs, updateDoc } = require('firebase/firestore');
 
 // --- CONFIGURATION ---
-const VERSION = '1.4.2'; // Updated for PWA/Service Worker
+const VERSION = '1.4.3'; // Updated for real Web Push subscription flow
 const PORT = 8080; 
 const OFFLINE_THRESHOLD = 60000;
 const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
 const CONFIG_PATH = path.join(__dirname, 'config.json');
+
+// VAPID Public Key (Required for iOS to show the prompt)
+// Generate one using: npx web-push generate-vapid-keys
+const VAPID_PUBLIC_KEY = 'BEn_xXv6f...replace_with_your_actual_public_key...';
 
 let firebaseConfig = null;
 if (fs.existsSync(CONFIG_PATH)) {
@@ -81,7 +85,7 @@ async function sendMobilePush(title, body, isOnline) {
         tokensSnapshot.forEach(doc => tokens.push(doc.id));
         if (tokens.length === 0) return;
         console.log(`[PUSH] Dispatching alerts to ${tokens.length} mobile devices...`);
-        // Logic for FCM API call would go here
+        // In production, use the 'web-push' library here to send to the stored subscription endpoints
     } catch (e) {
         console.error("[PUSH ERROR]", e.message);
     }
@@ -140,13 +144,24 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/javascript' });
         return res.end(`
             self.addEventListener('push', function(event) {
-                const data = event.data ? event.data.json() : {};
+                let data = { title: "Observer Alert", body: "Node status change detected." };
+                try {
+                    data = event.data.json();
+                } catch(e) {}
+                
                 event.waitUntil(
-                    self.registration.showNotification(data.title || "Observer Alert", {
-                        body: data.body || "Node status change detected.",
-                        icon: "https://cdn-icons-png.flaticon.com/512/564/564348.png"
+                    self.registration.showNotification(data.title, {
+                        body: data.body,
+                        icon: "https://cdn-icons-png.flaticon.com/512/564/564348.png",
+                        badge: "https://cdn-icons-png.flaticon.com/512/564/564348.png",
+                        vibrate: [200, 100, 200]
                     })
                 );
+            });
+
+            self.addEventListener('notificationclick', function(event) {
+                event.notification.close();
+                event.waitUntil(clients.openWindow('/'));
             });
         `);
     }
@@ -181,15 +196,18 @@ const server = http.createServer(async (req, res) => {
         });
     }
 
-    // API: Register Push Token
+    // API: Register Push Token/Subscription
     else if (url.pathname === '/api/register-token' && req.method === 'POST') {
         let body = '';
         req.on('data', chunk => body += chunk);
         req.on('end', async () => {
             try {
-                const { token } = JSON.parse(body);
-                if (currentUser && token) {
-                    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'push_tokens', token), {
+                const { subscription } = JSON.parse(body);
+                if (currentUser && subscription) {
+                    // Store the full subscription object (including endpoint and keys)
+                    const subId = Buffer.from(subscription.endpoint).toString('base64').substring(0, 50);
+                    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'push_tokens', subId), {
+                        subscription,
                         registeredAt: Date.now(),
                         uid: currentUser.uid
                     });
@@ -327,6 +345,17 @@ function generateUI() {
         <script>
             let currentData = [];
             let activeNodeId = null;
+            const VAPID_KEY = '${VAPID_PUBLIC_KEY}';
+
+            // Helper to convert VAPID key
+            function urlBase64ToUint8Array(base64String) {
+                const padding = '='.repeat((4 - base64String.length % 4) % 4);
+                const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+                const rawData = window.atob(base64);
+                const outputArray = new Uint8Array(rawData.length);
+                for (let i = 0; i < rawData.length; ++i) { outputArray[i] = rawData.charCodeAt(i); }
+                return outputArray;
+            }
 
             // Service Worker Registration
             if ('serviceWorker' in navigator) {
@@ -350,36 +379,39 @@ function generateUI() {
             async function initMobilePush() {
                 const btn = document.getElementById('notifBtn');
                 
+                // CRITICAL: iOS only prompts if in standalone mode
                 if (isIos() && !isStandalone()) {
                     document.getElementById('iosModal').classList.remove('hidden');
                     return;
                 }
 
                 try {
-                    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Initializing...';
+                    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Subscribing...';
                     
-                    const permission = await Notification.requestPermission();
-                    if (permission !== "granted") {
-                        alert("Permission denied. Ensure notifications are enabled in your device settings for the 'Observer' home screen app.");
-                        btn.innerHTML = '<i class="fas fa-mobile-alt"></i> Setup Mobile Alerts';
-                        return;
-                    }
-
-                    const mockToken = "fcm_token_" + Math.random().toString(36).substr(2, 9);
+                    // 1. Wait for Service Worker
+                    const registration = await navigator.serviceWorker.ready;
                     
-                    await fetch('/api/register-token', {
-                        method: 'POST',
-                        body: JSON.stringify({ token: mockToken })
+                    // 2. Request Subscription (This triggers the system prompt on iOS)
+                    const subscription = await registration.pushManager.subscribe({
+                        userVisibleOnly: true,
+                        applicationServerKey: urlBase64ToUint8Array(VAPID_KEY)
                     });
 
-                    btn.innerHTML = '<i class="fas fa-check-circle text-emerald-400"></i> Mobile Alerts Active';
+                    // 3. Send subscription to server
+                    await fetch('/api/register-token', {
+                        method: 'POST',
+                        body: JSON.stringify({ subscription })
+                    });
+
+                    btn.innerHTML = '<i class="fas fa-check-circle text-emerald-400"></i> Alerts Active';
                     btn.classList.replace('bg-blue-600', 'bg-emerald-500/10');
                     btn.classList.add('text-emerald-400', 'border-emerald-500/20');
                     
-                    alert("Mobile push registered successfully!");
+                    alert("System alerts enabled successfully!");
                 } catch (e) {
-                    console.error(e);
+                    console.error("Subscription Error:", e);
                     btn.innerHTML = '<i class="fas fa-exclamation-triangle"></i> Setup Failed';
+                    alert("Unable to enable alerts. Ensure your browser is up to date and you have a valid VAPID key configured on the server.");
                 }
             }
 
@@ -402,7 +434,7 @@ function generateUI() {
                 const filteredNodes = currentData.filter(n => n.hostname.toLowerCase().includes(filter) || n.id.toLowerCase().includes(filter));
 
                 grid.innerHTML = filteredNodes.map(node => \`
-                    <div class="bg-slate-900/50 border \${node.isOnline ? 'border-slate-800' : 'border-red-900/30'} rounded-3xl p-6 transition-all group relative overflow-hidden">
+                    <div class="bg-slate-900/50 border \${node.isOnline ? 'border-slate-800' : 'border-red-900/30'} rounded-3xl p-6 transition-all group relative overflow-hidden text-left">
                         <div class="flex justify-between items-start mb-6">
                             <div class="p-3 bg-blue-500/10 rounded-2xl">
                                 <i class="fas fa-server text-blue-400 text-xl"></i>
@@ -437,29 +469,29 @@ function generateUI() {
                 if (!node) return;
                 const clients = (node.scannedDevices || []).filter(c => c.ip.includes(filter) || (c.name || '').toLowerCase().includes(filter));
                 content.innerHTML = \`
-                    <div class="bg-slate-900/50 border border-slate-800 rounded-3xl p-6 md:p-8 mb-6">
+                    <div class="bg-slate-900/50 border border-slate-800 rounded-3xl p-6 md:p-8 mb-6 text-left">
                         <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
                             <div>
                                 <h2 class="text-2xl font-bold text-white">\${node.hostname}</h2>
                                 <p class="text-slate-500 text-xs font-medium uppercase tracking-widest mt-1">Subnet: \${node.ip.replace('::ffff:', '')}</p>
                             </div>
-                            <div class="text-[10px] bg-slate-800 text-slate-400 px-3 py-1.5 rounded-xl border border-slate-700 font-bold">LAST SYNC: \${new Date(node.lastSeen).toLocaleTimeString()}</div>
+                            <div class="text-[10px] bg-slate-800 text-slate-400 px-3 py-1.5 rounded-xl border border-slate-700 font-bold uppercase tracking-tighter">LAST SYNC: \${new Date(node.lastSeen).toLocaleTimeString()}</div>
                         </div>
                     </div>
                     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                         \${clients.map(c => {
                             const isOld = (Date.now() - c.lastSeen) > 300000;
                             return \`
-                                <div class="bg-slate-900 border border-slate-800 p-5 rounded-2xl hover:border-blue-500/50 transition-all group">
+                                <div class="bg-slate-900 border border-slate-800 p-5 rounded-2xl hover:border-blue-500/50 transition-all group text-left">
                                     <div class="flex justify-between items-start mb-3">
-                                        <span class="text-blue-400 font-mono font-bold text-xs">\${c.ip}</span>
+                                        <span class="text-blue-400 font-mono font-bold text-xs font-black">\${c.ip}</span>
                                         <button onclick="deleteClient('\${node.id}', '\${c.ip}')" class="text-slate-600 hover:text-red-500 transition-colors p-1"><i class="fas fa-trash-alt text-xs"></i></button>
                                     </div>
-                                    <h4 class="text-white font-bold mb-1 truncate text-sm">\${c.name || 'Generic Device'}</h4>
-                                    <p class="text-[10px] text-slate-500 mb-4 truncate font-medium">\${c.description || 'Service discovery pending...'}</p>
+                                    <h4 class="text-white font-bold mb-1 truncate text-sm uppercase tracking-tight">\${c.name || 'Generic Device'}</h4>
+                                    <p class="text-[10px] text-slate-500 mb-4 truncate font-medium uppercase">\${c.description || 'Discovery log pending...'}</p>
                                     <div class="flex justify-between items-center text-[8px] font-bold text-slate-600 uppercase pt-3 border-t border-slate-800 tracking-tighter">
                                         <span>Seen: \${new Date(c.lastSeen).toLocaleTimeString()}</span>
-                                        <span class="\${isOld ? 'text-orange-500' : 'text-emerald-500'}">\${isOld ? 'Stale' : 'Active'}</span>
+                                        <span class="\${isOld ? 'text-orange-500' : 'text-emerald-500'} font-black">\${isOld ? 'Stale' : 'Active'}</span>
                                     </div>
                                 </div>
                             \`;
@@ -484,7 +516,7 @@ function generateUI() {
             }
 
             async function deleteClient(nodeId, clientIp) {
-                if (!confirm(\`Remove \${clientIp} from the inventory?\`)) return;
+                if (!confirm(\`Remove \${clientIp} from the fleet inventory?\`)) return;
                 try {
                     await fetch('/api/delete-client', { method: 'POST', body: JSON.stringify({ nodeId, clientIp }) });
                     fetchData();
