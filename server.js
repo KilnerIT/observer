@@ -1,342 +1,301 @@
 /**
- * Remote Monitor Server
- * * Features:
- * - REST API for heartbeats & SNMP data.
- * - Persistent Storage: Saves node data to Firestore.
- * - Auto-sync with GitHub on startup.
- * - Runtime Config: Loads credentials from a local config.json.
+ * Observer Central - Enterprise Infrastructure Hub
+ * Features:
+ * - Nmap Fingerprint Processing (Service & Version detection)
+ * - Persistent Storage (Firestore)
+ * - Discovery Explorer (Drill-down per Node)
+ * - Client Management (Delete/Prune devices)
+ * - Real-time Filtering
  */
 
 const http = require('http');
 const { execSync } = require('child_process');
-const os = require('os');
 const fs = require('fs');
 const path = require('path');
 
-// Firebase Requirements (Standard Node.js Compatibility)
+// Firebase SDKs
 const { initializeApp } = require('firebase/app');
-const { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } = require('firebase/auth');
-const { getFirestore, doc, setDoc, collection, getDocs } = require('firebase/firestore');
+const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/auth');
+const { getFirestore, doc, setDoc, getDoc, collection, getDocs, updateDoc } = require('firebase/firestore');
 
 // --- CONFIGURATION ---
 const PORT = 8080; 
-const OFFLINE_THRESHOLD_MS = 60000; 
+const OFFLINE_THRESHOLD = 60000;
 const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 
-/**
- * FIREBASE CONFIGURATION LOAD (RUNTIME)
- */
 let firebaseConfig = null;
-
-if (typeof __firebase_config !== 'undefined') {
-    firebaseConfig = JSON.parse(__firebase_config);
-} 
-else if (fs.existsSync(CONFIG_PATH)) {
-    try {
-        const configData = fs.readFileSync(CONFIG_PATH, 'utf8');
-        firebaseConfig = JSON.parse(configData);
-        console.log("[CONFIG] Loaded Firebase credentials from config.json");
-    } catch (err) {
-        console.error("[CONFIG] Error parsing config.json:", err.message);
-    }
+if (fs.existsSync(CONFIG_PATH)) {
+    firebaseConfig = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
 }
 
-if (!firebaseConfig || !firebaseConfig.apiKey) {
-    console.error("\n[CRITICAL] No Firebase configuration found! Persistence will not work.\n");
-}
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'observer-prod';
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
 
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'observer-default';
-const initialToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-
-// Initialize Firebase
-let app, auth, db;
-if (firebaseConfig) {
-    try {
-        app = initializeApp(firebaseConfig);
-        auth = getAuth(app);
-        db = getFirestore(app);
-        console.log(`[INIT] Firebase initialized for Project: ${firebaseConfig.projectId}`);
-        console.log(`[INIT] Target App ID: ${appId}`);
-    } catch (e) {
-        console.error("\n[CRITICAL] Firebase failed to initialize. Check config.json.", e.message);
-    }
-}
-
-// State: Local cache
-const clients = new Map();
+const nodes = new Map();
 let currentUser = null;
 
-/**
- * Auth Logic
- */
-const initAuth = async () => {
-    if (!auth) return;
-    try {
-        if (initialToken) {
-            await signInWithCustomToken(auth, initialToken);
-        } else {
-            await signInAnonymously(auth);
-        }
-    } catch (err) {
-        console.error("\n[AUTH ERROR] Failed to sign in:", err.message);
-        console.error("TIP: Ensure 'Anonymous' provider is enabled in Firebase Console > Authentication.\n");
-    }
-};
-
-/**
- * Load all clients from Firestore on startup
- */
-async function loadPersistedClients() {
-    if (!currentUser || !db) return;
-    
-    // Construct Path (Mandatory Rule 1)
-    const colPath = `artifacts/${appId}/public/data/nodes`;
-    console.log(`[DB] Attempting to sync from: ${colPath}`);
-    
-    try {
-        const nodesCol = collection(db, 'artifacts', appId, 'public', 'data', 'nodes');
-        const querySnapshot = await getDocs(nodesCol);
-        
-        if (querySnapshot.empty) {
-            console.log("[DB] Sync Complete: 0 existing nodes found. Waiting for first heartbeats.");
-        } else {
-            querySnapshot.forEach((doc) => {
-                clients.set(doc.id, doc.data());
-            });
-            console.log(`[DB] Sync Complete: Restored ${clients.size} nodes from cloud.`);
-        }
-    } catch (err) {
-        if (err.message.includes('NOT_FOUND')) {
-            console.error("\n[DB ERROR] Firestore Database Not Found (Code 5).");
-            console.error("FIX: Go to Firebase Console -> Build -> Firestore Database and click 'Create Database'.\n");
-        } else {
-            console.error("[DB ERROR] Failed to fetch nodes:", err.message);
-        }
-    }
-}
-
-// Listen for Auth Changes
-if (auth) {
-    onAuthStateChanged(auth, async (user) => {
-        currentUser = user;
-        if (user) {
-            console.log(`[AUTH] Session verified for UID: ${user.uid}`);
-            await loadPersistedClients();
-        }
-    });
-}
-
-/**
- * GitHub Sync
- */
-function syncWithGithub() {
-    console.log(`[GIT] Checking for server updates...`);
-    try {
-        execSync('git rev-parse --is-inside-work-tree', { stdio: 'ignore' });
-        const output = execSync('git pull origin main', { encoding: 'utf8' });
-        if (output.includes('Already up to date')) {
-            console.log("[GIT] Server code is up to date.");
-        } else {
-            console.log("[GIT] Server updates downloaded successfully!");
-        }
-    } catch (error) {
-        console.log("[GIT] Auto-update skipped (not a git repo).");
-    }
-}
-
-const server = http.createServer((req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-    if (req.method === 'OPTIONS') {
-        res.writeHead(204); res.end(); return;
-    }
-
-    // API: Receive Heartbeats
-    if (req.url === '/api/heartbeat' && req.method === 'POST') {
-        let body = '';
-        req.on('data', chunk => { body += chunk.toString(); });
-        req.on('end', async () => {
-            try {
-                const data = JSON.parse(body);
-                const nodeData = {
-                    ...data,
-                    lastSeen: Date.now(),
-                    ip: req.socket.remoteAddress
-                };
-
-                clients.set(data.id, nodeData);
-
-                // Save to Firestore
-                if (currentUser && db) {
-                    const nodeRef = doc(db, 'artifacts', appId, 'public', 'data', 'nodes', data.id);
-                    setDoc(nodeRef, nodeData).catch(err => {
-                        console.error(`[DB SAVE ERROR] ${err.message}`);
-                    });
-                }
-
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ status: 'ok' }));
-            } catch (e) {
-                res.writeHead(400); res.end('Invalid JSON');
-            }
-        });
-    } 
-    
-    // UI: Dashboard
-    else if (req.url === '/' || req.url === '/index.html') {
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(generateDashboardHTML());
-    }
-
-    // API: Get Status
-    else if (req.url === '/api/status' && req.method === 'GET') {
-        const clientList = Array.from(clients.values()).map(c => ({
-            ...c,
-            status: (Date.now() - c.lastSeen) < OFFLINE_THRESHOLD_MS ? 'Online' : 'Offline'
-        }));
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(clientList));
-    }
-
-    else {
-        res.writeHead(404); res.end('Not Found');
+// Auth & Data Recovery
+signInAnonymously(auth).catch(e => console.error("[AUTH] Error:", e.message));
+onAuthStateChanged(auth, async (user) => {
+    currentUser = user;
+    if (user) {
+        console.log(`[SYSTEM] Authenticated. Loading persistence...`);
+        const snapshot = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'nodes'));
+        snapshot.forEach(d => nodes.set(d.id, d.data()));
+        console.log(`[SYSTEM] Restored ${nodes.size} nodes.`);
     }
 });
 
-function generateDashboardHTML() {
+const server = http.createServer(async (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS, DELETE');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+
+    const url = new URL(req.url, `http://${req.headers.host}`);
+
+    // API: Heartbeat & Discovery Merge
+    if (url.pathname === '/api/heartbeat' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', async () => {
+            const data = JSON.parse(body);
+            const existing = nodes.get(data.id) || { scannedDevices: [] };
+            
+            // Merge scanned devices logic
+            const currentScans = data.scannedDevices || [];
+            const mergedDevices = [...(existing.scannedDevices || [])];
+
+            currentScans.forEach(newDev => {
+                const idx = mergedDevices.findIndex(d => d.ip === newDev.ip);
+                if (idx > -1) {
+                    mergedDevices[idx] = { ...mergedDevices[idx], ...newDev, lastSeen: Date.now() };
+                } else {
+                    mergedDevices.push({ ...newDev, firstSeen: Date.now(), lastSeen: Date.now() });
+                }
+            });
+
+            const nodeUpdate = { ...data, scannedDevices: mergedDevices, lastSeen: Date.now(), ip: req.socket.remoteAddress };
+            nodes.set(data.id, nodeUpdate);
+
+            if (currentUser) {
+                setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'nodes', data.id), nodeUpdate);
+            }
+            res.writeHead(200); res.end(JSON.stringify({ status: 'ok' }));
+        });
+    }
+
+    // API: Delete Discovered Client
+    else if (url.pathname === '/api/delete-client' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', async () => {
+            const { nodeId, clientIp } = JSON.parse(body);
+            const node = nodes.get(nodeId);
+            if (node) {
+                node.scannedDevices = node.scannedDevices.filter(d => d.ip !== clientIp);
+                nodes.set(nodeId, node);
+                if (currentUser) {
+                    updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'nodes', nodeId), {
+                        scannedDevices: node.scannedDevices
+                    });
+                }
+            }
+            res.writeHead(200); res.end(JSON.stringify({ status: 'deleted' }));
+        });
+    }
+
+    // API: Get Status
+    else if (url.pathname === '/api/status') {
+        const list = Array.from(nodes.values()).map(n => ({
+            ...n,
+            isOnline: (Date.now() - n.lastSeen) < OFFLINE_THRESHOLD
+        }));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(list));
+    }
+
+    // UI: Main App
+    else {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(generateUI());
+    }
+});
+
+function generateUI() {
     return `
     <!DOCTYPE html>
-    <html>
+    <html class="dark">
     <head>
         <title>Observer Central</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <script src="https://cdn.tailwindcss.com"></script>
-        <style>
-            .custom-scrollbar::-webkit-scrollbar { width: 4px; }
-            .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-            .custom-scrollbar::-webkit-scrollbar-thumb { background: #374151; border-radius: 10px; }
-        </style>
+        <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     </head>
-    <body class="bg-[#0f172a] text-gray-100 font-sans p-4 md:p-8">
-        <div class="max-w-7xl mx-auto">
-            <header class="mb-10 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+    <body class="bg-[#0b0f1a] text-slate-200 min-h-screen font-sans">
+        <div id="app" class="p-6 max-w-7xl mx-auto">
+            <!-- Header -->
+            <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-10 gap-4">
                 <div>
-                    <h1 class="text-4xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-emerald-400">
-                        Observer Central
+                    <h1 class="text-3xl font-black text-white flex items-center gap-3">
+                        <i class="fas fa-satellite-dish text-blue-500"></i> OBSERVER <span class="text-blue-500">CENTRAL</span>
                     </h1>
-                    <p class="text-gray-400 mt-1 text-sm">Enterprise Node Persistence Layer</p>
+                    <p class="text-slate-500 text-sm font-medium mt-1">Infrastructure Command & Discovery</p>
                 </div>
-                <div class="flex items-center gap-3 bg-gray-800/50 p-3 rounded-xl border border-gray-700">
-                    <div class="w-2.5 h-2.5 rounded-full bg-blue-500 animate-pulse"></div>
-                    <span class="text-[10px] font-mono text-gray-400 tracking-tighter uppercase">Cloud Storage Active</span>
+                <div class="flex items-center gap-4">
+                    <input type="text" id="globalFilter" placeholder="Filter nodes/clients..." 
+                           class="bg-slate-900 border border-slate-800 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-64">
+                    <div class="px-4 py-2 bg-slate-900 border border-slate-800 rounded-xl flex items-center gap-3">
+                        <div class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
+                        <span class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">System Live</span>
+                    </div>
                 </div>
-            </header>
-            <div class="grid grid-cols-1 xl:grid-cols-2 gap-8" id="client-grid"></div>
+            </div>
+
+            <!-- View Switcher (Router) -->
+            <div id="mainView">
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6" id="nodeGrid"></div>
+            </div>
+
+            <div id="explorerView" class="hidden">
+                <button onclick="showMain()" class="mb-6 flex items-center gap-2 text-slate-400 hover:text-white transition-colors">
+                    <i class="fas fa-arrow-left text-xs"></i> Back to Fleet
+                </button>
+                <div id="explorerContent"></div>
+            </div>
         </div>
+
         <script>
-            function formatUptime(seconds) {
-                if (!seconds) return '0s';
-                const days = Math.floor(seconds / (3600*24));
-                const hrs = Math.floor((seconds % (3600*24)) / 3600);
-                const mins = Math.floor((seconds % 3600) / 60);
-                return \`\${days}d \${hrs}h \${mins}m\`;
+            let currentData = [];
+            let activeNodeId = null;
+
+            async function fetchData() {
+                const res = await fetch('/api/status');
+                currentData = await res.json();
+                render();
             }
-            async function refreshStatus() {
-                try {
-                    const response = await fetch('/api/status');
-                    const data = await response.json();
-                    const grid = document.getElementById('client-grid');
-                    if (data.length === 0) {
-                        grid.innerHTML = '<div class="col-span-full text-center py-32 text-gray-600 border-2 border-dashed border-gray-800 rounded-3xl text-xl italic font-medium">Awaiting node check-in...</div>';
-                        return;
-                    }
-                    grid.innerHTML = data.map(node => {
-                        const isOnline = node.status === 'Online';
-                        const scanCount = node.scannedDevices ? node.scannedDevices.length : 0;
-                        return \`
-                            <div class="bg-gray-900/40 backdrop-blur-md border \${isOnline ? 'border-gray-800' : 'border-red-900/50'} rounded-3xl p-6 shadow-2xl relative group transition-all duration-500">
-                                <div class="flex justify-between items-start mb-8">
-                                    <div class="flex items-center gap-4">
-                                        <div class="p-3 bg-blue-500/10 rounded-2xl border border-blue-500/20">
-                                            <svg class="w-8 h-8 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"></path></svg>
-                                        </div>
-                                        <div>
-                                            <h3 class="text-2xl font-bold text-white group-hover:text-blue-400 transition-colors">\${node.hostname}</h3>
-                                            <div class="flex items-center gap-2 mt-1">
-                                                <span class="text-[10px] bg-gray-800 text-gray-400 px-2 py-0.5 rounded font-mono border border-gray-700">ID: \${node.id}</span>
-                                                <span class="text-[10px] text-gray-500 font-mono">\${node.os}</span>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div class="text-right">
-                                        <div class="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold border \${isOnline ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'bg-red-500/10 text-red-400 border-red-500/30'}">
-                                            \${node.status.toUpperCase()}
-                                        </div>
-                                        <p class="text-[10px] text-gray-500 mt-2 font-mono uppercase tracking-tighter">
-                                            \${isOnline ? 'Last Beat: ' + Math.floor((Date.now() - node.lastSeen)/1000) + 's ago' : 'OFFLINE'}
-                                        </p>
-                                    </div>
-                                </div>
-                                <div class="grid grid-cols-2 md:grid-cols-3 gap-4 mb-8 text-center">
-                                    <div class="bg-black/20 p-4 rounded-2xl border border-gray-800">
-                                        <p class="text-[10px] uppercase text-gray-500 font-bold mb-1 tracking-widest">Uptime</p>
-                                        <p class="text-blue-400 font-mono font-bold">\${formatUptime(node.uptime)}</p>
-                                    </div>
-                                    <div class="bg-black/20 p-4 rounded-2xl border border-gray-800">
-                                        <p class="text-[10px] uppercase text-gray-500 font-bold mb-1 tracking-widest">Storage</p>
-                                        <p class="text-emerald-400 font-mono font-bold text-sm">\${node.disk}</p>
-                                    </div>
-                                    <div class="bg-black/20 p-4 rounded-2xl border border-gray-800 col-span-2 md:col-span-1">
-                                        <p class="text-[10px] uppercase text-gray-500 font-bold mb-1 tracking-widest">Public IP</p>
-                                        <p class="text-amber-400 font-mono font-bold text-xs truncate">\${node.ip.replace('::ffff:', '')}</p>
-                                    </div>
-                                </div>
-                                <div class="bg-gray-800/30 rounded-3xl p-5 border border-gray-700/50">
-                                    <h4 class="text-xs font-bold uppercase text-gray-400 mb-4 flex items-center gap-2">
-                                        <svg class="w-4 h-4 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
-                                        Network Inventory (\${scanCount})
-                                    </h4>
-                                    <div class="space-y-2 max-h-48 overflow-y-auto custom-scrollbar pr-1">
-                                        \${scanCount > 0 
-                                            ? node.scannedDevices.map(dev => \`
-                                                <div class="bg-gray-900/60 p-3 rounded-xl border border-gray-800 flex flex-col gap-0.5 transition-all hover:bg-gray-900">
-                                                    <div class="flex justify-between items-center">
-                                                        <span class="text-xs font-mono font-bold text-blue-300">\${dev.ip}</span>
-                                                        <span class="text-[9px] font-bold uppercase \${dev.name !== 'Unresponsive' ? 'text-emerald-500' : 'text-gray-600'}">
-                                                            \${dev.name !== 'Unresponsive' ? 'SNMP' : 'Down'}
-                                                        </span>
-                                                    </div>
-                                                    <span class="text-[11px] font-medium text-white truncate text-left font-bold">\${dev.name}</span>
-                                                    <span class="text-[9px] text-gray-500 italic truncate text-left">\${dev.description}</span>
-                                                </div>
-                                            \`).join('')
-                                            : '<div class="text-center py-8 text-gray-600 text-xs italic">Awaiting discovery scan...</div>'
-                                        }
-                                    </div>
-                                </div>
+
+            function render() {
+                const filter = document.getElementById('globalFilter').value.toLowerCase();
+                
+                if (activeNodeId) {
+                    renderExplorer(filter);
+                } else {
+                    renderGrid(filter);
+                }
+            }
+
+            function renderGrid(filter) {
+                const grid = document.getElementById('nodeGrid');
+                const filteredNodes = currentData.filter(n => 
+                    n.hostname.toLowerCase().includes(filter) || n.id.toLowerCase().includes(filter)
+                );
+
+                grid.innerHTML = filteredNodes.map(node => \`
+                    <div class="bg-slate-900/50 border \${node.isOnline ? 'border-slate-800' : 'border-red-900/30'} rounded-3xl p-6 hover:shadow-2xl transition-all group">
+                        <div class="flex justify-between items-start mb-6">
+                            <div class="p-3 bg-blue-500/10 rounded-2xl">
+                                <i class="fas fa-server text-blue-400 text-xl"></i>
                             </div>
-                        \`;
-                    }).join('');
-                } catch (err) { console.error('Dashboard Error:', err); }
+                            <span class="px-2 py-1 rounded-lg text-[10px] font-black tracking-widest uppercase \${node.isOnline ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400'}">
+                                \${node.isOnline ? 'Online' : 'Offline'}
+                            </span>
+                        </div>
+                        <h3 class="text-xl font-bold text-white mb-1">\${node.hostname}</h3>
+                        <p class="text-xs text-slate-500 font-mono mb-6 uppercase tracking-tighter">Node ID: \${node.id}</p>
+                        
+                        <div class="grid grid-cols-2 gap-3 mb-6">
+                            <div class="bg-black/20 p-3 rounded-xl border border-slate-800/50">
+                                <span class="text-[9px] uppercase text-slate-500 block">Discovery</span>
+                                <span class="text-sm font-bold text-blue-400">\${node.scannedDevices.length} Clients</span>
+                            </div>
+                            <div class="bg-black/20 p-3 rounded-xl border border-slate-800/50">
+                                <span class="text-[9px] uppercase text-slate-500 block">Storage</span>
+                                <span class="text-sm font-bold text-slate-300">\${node.disk.split(' ')[0]}</span>
+                            </div>
+                        </div>
+
+                        <button onclick="launchExplorer('\${node.id}')" 
+                                class="w-full py-3 bg-slate-800 hover:bg-blue-600 text-white rounded-2xl font-bold text-sm transition-all flex items-center justify-center gap-2">
+                            Launch Explorer <i class="fas fa-external-link-alt text-[10px]"></i>
+                        </button>
+                    </div>
+                \`).join('');
             }
-            setInterval(refreshStatus, 3000);
-            refreshStatus();
+
+            function renderExplorer(filter) {
+                const node = currentData.find(n => n.id === activeNodeId);
+                const content = document.getElementById('explorerContent');
+                if (!node) return;
+
+                const clients = (node.scannedDevices || []).filter(c => 
+                    c.ip.includes(filter) || (c.name || '').toLowerCase().includes(filter)
+                );
+
+                content.innerHTML = \`
+                    <div class="bg-slate-900/50 border border-slate-800 rounded-3xl p-8 mb-8">
+                        <h2 class="text-2xl font-bold text-white mb-2">\${node.hostname} Discovery Log</h2>
+                        <p class="text-slate-500 text-sm">Managing results for subnet \${node.ip}</p>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                        \${clients.map(c => {
+                            const isOld = (Date.now() - c.lastSeen) > 300000; // 5 mins
+                            return \`
+                                <div class="bg-slate-900 border border-slate-800 p-5 rounded-2xl relative group">
+                                    <div class="flex justify-between items-start mb-3">
+                                        <span class="text-blue-400 font-mono font-bold text-sm">\${c.ip}</span>
+                                        <button onclick="deleteClient('\${node.id}', '\${c.ip}')" class="text-slate-600 hover:text-red-500 transition-colors">
+                                            <i class="fas fa-trash-alt text-xs"></i>
+                                        </button>
+                                    </div>
+                                    <h4 class="text-white font-bold mb-1 truncate">\${c.name || 'Generic Device'}</h4>
+                                    <p class="text-[10px] text-slate-500 mb-3 truncate">\${c.description || 'No fingerprint data available'}</p>
+                                    <div class="flex justify-between items-center text-[9px] font-mono text-slate-600 uppercase pt-3 border-t border-slate-800">
+                                        <span>Seen: \${new Date(c.lastSeen).toLocaleTimeString()}</span>
+                                        <span class="\${isOld ? 'text-orange-500' : 'text-emerald-500'} font-black">
+                                            \${isOld ? 'Stale' : 'Active'}
+                                        </span>
+                                    </div>
+                                </div>
+                            \`;
+                        }).join('')}
+                    </div>
+                \`;
+            }
+
+            function launchExplorer(id) {
+                activeNodeId = id;
+                document.getElementById('mainView').classList.add('hidden');
+                document.getElementById('explorerView').classList.remove('hidden');
+                render();
+            }
+
+            function showMain() {
+                activeNodeId = null;
+                document.getElementById('mainView').classList.remove('hidden');
+                document.getElementById('explorerView').classList.add('hidden');
+                render();
+            }
+
+            async function deleteClient(nodeId, clientIp) {
+                if (!confirm(\`Remove \${clientIp} from persistence?\`)) return;
+                await fetch('/api/delete-client', {
+                    method: 'POST',
+                    body: JSON.stringify({ nodeId, clientIp })
+                });
+                fetchData();
+            }
+
+            document.getElementById('globalFilter').addEventListener('input', render);
+            setInterval(fetchData, 5000);
+            fetchData();
         </script>
     </body>
     </html>
     `;
 }
 
-// Startup Sequence
-syncWithGithub();
-initAuth();
-
-server.listen(PORT, () => {
-    console.log(`\n==========================================`);
-    console.log(` OBSERVER CENTRAL PERSISTENCE ACTIVE`);
-    console.log(` DASHBOARD: http://localhost:${PORT}`);
-    console.log(`==========================================\n`);
-});
+server.listen(PORT, () => console.log(\`Observer Hub @ http://localhost:\${PORT}\`));
