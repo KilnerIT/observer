@@ -1,0 +1,4 @@
+git add package.json
+git commit -m "Add package.json for Render deployment"
+git push origin main
+4.  **Redeploy:** Render will detect the new commit and automatically start a new build. This time, it will find the `package.json`, run `npm install` to download Firebase, and successfully start your server using the `node server.js` command.
