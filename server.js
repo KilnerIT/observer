@@ -1,10 +1,11 @@
 /**
- * Observer Central - Enterprise Infrastructure Hub v1.9.2
+ * Observer Central - Enterprise Infrastructure Hub v1.9.3
  * Features:
  * - Dynamic Admin Management: Add/Remove authorized emails via UI
- * - Firestore Persistence: Admin list saved to cloud settings
+ * - Firestore Persistence: Admin list saved to cloud settings (Path fixed)
  * - Emergency Backdoor: Username/Password bypass (Observer / !0bserver!)
  * - Admin Utility Bar: Shows active session type (Google or Emergency)
+ * - Bugfix: Resolved logout persistence and admin list refresh issues
  */
 
 const http = require('http');
@@ -18,7 +19,7 @@ const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/aut
 const { getFirestore, doc, setDoc, getDoc, collection, getDocs, updateDoc } = require('firebase/firestore');
 
 // --- CONFIGURATION ---
-const VERSION = '1.9.2'; 
+const VERSION = '1.9.3'; 
 const PORT = process.env.PORT || 8080; 
 const OFFLINE_THRESHOLD = 60000;
 const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
@@ -54,7 +55,7 @@ const nodes = new Map();
 let settings = { 
     siteTitle: "OBSERVER HUB", 
     logoUrl: "https://cdn-icons-png.flaticon.com/512/564/564348.png",
-    allowedAdmins: [] // Now managed via Database
+    allowedAdmins: [] 
 };
 let currentUser = null;
 
@@ -67,7 +68,8 @@ onAuthStateChanged(auth, async (user) => {
         try {
             const snapshot = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'nodes'));
             snapshot.forEach(d => nodes.set(d.id, d.data()));
-            const setDocRef = await getDoc(doc(db, 'artifacts', appId, 'public', 'settings', 'config'));
+            // PATH FIX: Match firestore.rules public/data access
+            const setDocRef = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config'));
             if (setDocRef.exists()) {
                 const data = setDocRef.data();
                 settings = { ...settings, ...data, allowedAdmins: data.allowedAdmins || [] };
@@ -134,10 +136,13 @@ const server = http.createServer(async (req, res) => {
         let body = '';
         req.on('data', chunk => body += chunk);
         req.on('end', async () => {
-            const data = JSON.parse(body);
-            settings = { ...settings, ...data };
-            if (currentUser) setDoc(doc(db, 'artifacts', appId, 'public', 'settings', 'config'), settings);
-            res.writeHead(200); res.end(JSON.stringify({ status: 'updated' }));
+            try {
+                const data = JSON.parse(body);
+                settings = { ...settings, ...data };
+                // PATH FIX: Match firestore.rules public/data access
+                if (currentUser) await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config'), settings);
+                res.writeHead(200); res.end(JSON.stringify({ status: 'updated' }));
+            } catch (e) { res.writeHead(400); res.end('Error'); }
         });
     }
 
@@ -368,9 +373,10 @@ function generateUI(cfg) {
                 }
             };
 
-            window.logout = () => {
+            window.logout = async () => {
                 sessionStorage.removeItem('observer_bypass');
-                signOut(auth);
+                await signOut(auth);
+                location.reload(); // Ensure UI resets and backdoor check clears
             };
 
             onAuthStateChanged(auth, async (user) => {
@@ -423,67 +429,87 @@ function generateUI(cfg) {
             }
 
             async function refreshData() {
-                const res = await fetch('/api/status');
-                const json = await res.json();
-                currentData = json.nodes;
-                currentSettings = json.settings;
-                updateStats();
-                render();
+                try {
+                    const res = await fetch('/api/status');
+                    const json = await res.json();
+                    currentData = json.nodes;
+                    currentSettings = json.settings;
+                    updateStats();
+                    updateAdminList(); // Explicitly update list on every refresh
+                    render();
+                } catch(e) { console.error("Refresh failed", e); }
             }
 
             window.toggleView = (view) => {
                 document.querySelectorAll('.view-section').forEach(s => s.classList.add('hidden'));
                 document.getElementById(view + 'View').classList.remove('hidden');
+                if (view === 'config') updateAdminList();
             };
 
             function updateBranding() {
-                document.getElementById('headerTitle').innerText = currentSettings.siteTitle;
-                document.getElementById('headerLogo').src = currentSettings.logoUrl;
-                document.getElementById('cfgTitle').value = currentSettings.siteTitle;
-                document.getElementById('cfgLogo').value = currentSettings.logoUrl;
+                document.getElementById('headerTitle').innerText = currentSettings.siteTitle || "OBSERVER HUB";
+                document.getElementById('headerLogo').src = currentSettings.logoUrl || "";
+                document.getElementById('cfgTitle').value = currentSettings.siteTitle || "";
+                document.getElementById('cfgLogo').value = currentSettings.logoUrl || "";
             }
 
             function updateAdminList() {
                 const list = document.getElementById('adminList');
-                list.innerHTML = (currentSettings.allowedAdmins || []).map(email => \`
+                if (!list) return;
+                const admins = currentSettings.allowedAdmins || [];
+                if (admins.length === 0) {
+                    list.innerHTML = '<p class="text-[10px] text-slate-500 italic py-2">No external admins configured.</p>';
+                    return;
+                }
+                list.innerHTML = admins.map(email => \`
                     <div class="flex justify-between items-center bg-slate-900 p-3 rounded-xl border border-slate-700">
                         <span class="text-xs font-bold">\${email}</span>
-                        <button onclick="removeAdmin('\${email}')" class="text-red-500 p-1"><i class="fas fa-times"></i></button>
+                        <button onclick="window.removeAdmin('\${email}')" class="text-red-500 hover:text-red-400 p-1 transition-colors"><i class="fas fa-times"></i></button>
                     </div>
                 \`).join('');
             }
 
             window.addAdmin = async () => {
-                const email = document.getElementById('newAdminEmail').value.trim();
+                const emailInput = document.getElementById('newAdminEmail');
+                const email = emailInput.value.trim();
                 if (!email) return;
-                const admins = currentSettings.allowedAdmins || [];
+                const admins = [...(currentSettings.allowedAdmins || [])];
                 if (!admins.includes(email)) admins.push(email);
                 await saveSettings({ allowedAdmins: admins });
-                document.getElementById('newAdminEmail').value = "";
-                refreshData().then(updateAdminList);
+                emailInput.value = "";
+                await refreshData();
             };
 
             window.removeAdmin = async (email) => {
                 const admins = (currentSettings.allowedAdmins || []).filter(e => e !== email);
                 await saveSettings({ allowedAdmins: admins });
-                refreshData().then(updateAdminList);
+                await refreshData();
             };
 
             async function saveSettings(extraData = {}) {
                 const data = { 
-                    siteTitle: document.getElementById('cfgTitle').value, 
-                    logoUrl: document.getElementById('cfgLogo').value,
+                    siteTitle: document.getElementById('cfgTitle').value || currentSettings.siteTitle, 
+                    logoUrl: document.getElementById('cfgLogo').value || currentSettings.logoUrl,
                     ...extraData
                 };
-                await fetch('/api/update-settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
+                await fetch('/api/update-settings', { 
+                    method: 'POST', 
+                    headers: {'Content-Type':'application/json'}, 
+                    body: JSON.stringify(data) 
+                });
             }
 
-            window.saveConfig = async () => { await saveSettings(); toggleView('dashboard'); fetchData(); };
+            window.saveConfig = async () => { 
+                await saveSettings(); 
+                toggleView('dashboard'); 
+                await refreshData(); 
+            };
 
             function updateStats() {
-                const totalNodes = currentData.filter(n => !n.isArchived).length;
-                const totalFleet = currentData.filter(n => !n.isArchived).reduce((acc, n) => acc + (n.scannedDevices?.length || 0), 0);
-                const totalPriority = currentData.filter(n => !n.isArchived).reduce((acc, n) => acc + (n.scannedDevices?.filter(d => d.isImportant).length || 0), 0);
+                const activeNodes = currentData.filter(n => !n.isArchived);
+                const totalNodes = activeNodes.length;
+                const totalFleet = activeNodes.reduce((acc, n) => acc + (n.scannedDevices?.length || 0), 0);
+                const totalPriority = activeNodes.reduce((acc, n) => acc + (n.scannedDevices?.filter(d => d.isImportant).length || 0), 0);
                 document.getElementById('statNodes').innerText = totalNodes;
                 document.getElementById('statFleet').innerText = totalFleet;
                 document.getElementById('statPriority').innerText = totalPriority;
@@ -497,8 +523,14 @@ function generateUI(cfg) {
 
             function renderList(filter) {
                 const list = document.getElementById('nodeList');
+                if (!list) return;
                 const filtered = currentData.filter(n => !n.isArchived && ((n.hostname || "").toLowerCase().includes(filter) || (n.location || "").toLowerCase().includes(filter)))
                     .sort((a, b) => (b.isOnline ? 1 : 0) - (a.isOnline ? 1 : 0));
+
+                if (filtered.length === 0) {
+                    list.innerHTML = '<div class="py-12 text-center text-slate-600 italic border border-dashed border-slate-800 rounded-3xl">No telemetry units reporting.</div>';
+                    return;
+                }
 
                 list.innerHTML = filtered.map(n => {
                     const statusColor = n.isOnline ? 'bg-emerald-500' : 'bg-red-500';
@@ -510,13 +542,13 @@ function generateUI(cfg) {
                                 \${n.isOnline ? 'Active' : 'Offline'}
                             </span>
                         </div>
-                        <div class="flex-1 min-w-0">
+                        <div class="flex-1 min-w-0 text-left">
                             <h3 class="text-xl font-black text-white uppercase tracking-tighter truncate">\${n.location || n.hostname}</h3>
-                            <p class="text-[10px] text-slate-500 font-bold uppercase tracking-widest truncate opacity-80">\${n.hostname} // \${n.ip}</p>
+                            <p class="text-[10px] text-slate-500 font-bold uppercase tracking-widest truncate opacity-80">\${n.hostname} // \${n.ip || '0.0.0.0'}</p>
                         </div>
                         <div class="flex items-center gap-6">
-                            <div class="text-center min-w-[60px]"><p class="text-[8px] text-slate-500 font-black uppercase">Fleet</p><p class="text-sm font-black text-blue-400 font-mono">\${n.scannedDevices.length}</p></div>
-                            <div class="text-center min-w-[60px]"><p class="text-[8px] text-slate-500 font-black uppercase">Priority</p><p class="text-sm font-black text-amber-500 font-mono">\${n.scannedDevices.filter(d => d.isImportant).length}</p></div>
+                            <div class="text-center min-w-[60px]"><p class="text-[8px] text-slate-500 font-black uppercase">Fleet</p><p class="text-sm font-black text-blue-400 font-mono">\${n.scannedDevices?.length || 0}</p></div>
+                            <div class="text-center min-w-[60px]"><p class="text-[8px] text-slate-500 font-black uppercase">Priority</p><p class="text-sm font-black text-amber-500 font-mono">\${n.scannedDevices?.filter(d => d.isImportant).length || 0}</p></div>
                         </div>
                         <div class="flex items-center gap-2">
                             <button onclick="window.launchExplorer('\${n.id}')" class="px-5 py-2.5 bg-slate-800 hover:bg-blue-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest transition-all">EXPLORE</button>
@@ -540,18 +572,18 @@ function generateUI(cfg) {
 
                 grid.innerHTML = \`
                     <div class="bg-slate-800 border border-slate-700 rounded-3xl p-8 mb-6 flex justify-between items-center shadow-inner">
-                        <div>
+                        <div class="text-left">
                             <h2 class="text-3xl font-black text-white uppercase tracking-tighter mb-1">\${node.location || node.hostname}</h2>
                             <p class="text-blue-500 text-[10px] font-black uppercase tracking-[0.3em] opacity-80">\${node.hostname} Subnet Discovery</p>
                         </div>
                         <div class="text-[9px] bg-slate-900 text-slate-400 px-4 py-2 rounded-xl border border-slate-800 font-bold uppercase tracking-widest">Update: \${new Date(node.lastSeen).toLocaleTimeString()}</div>
                     </div>
-                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 text-left">
                         \${devices.map(c => \`
                             <div class="bg-slate-800/80 border border-slate-700 p-5 rounded-2xl shadow-lg relative \${c.isImportant ? 'important-glow' : ''}">
                                 <div class="flex justify-between items-start mb-4">
                                     <span class="text-blue-400 font-mono font-black text-[10px]">\${c.ip}</span>
-                                    <button onclick="window.toggleImportant('\${node.id}', '\${c.ip}')" class="p-1.5 \${c.isImportant ? 'text-amber-400' : 'text-slate-600 hover:text-white'}"><i class="fas fa-star text-xs"></i></button>
+                                    <button onclick="window.toggleImportant('\${node.id}', '\${c.ip}')" class="p-1.5 \${c.isImportant ? 'text-amber-400' : 'text-slate-600 hover:text-white'} transition-colors"><i class="fas fa-star text-xs"></i></button>
                                 </div>
                                 <h4 class="text-white font-black mb-1 truncate text-sm uppercase tracking-tight">\${c.name}</h4>
                                 <p class="text-[9px] text-slate-500 mb-5 truncate font-bold uppercase tracking-widest opacity-60">\${c.description}</p>
@@ -561,7 +593,7 @@ function generateUI(cfg) {
 
             window.toggleImportant = async (nodeId, clientIp) => {
                 await fetch("/api/toggle-important", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ nodeId, clientIp }) });
-                refreshData();
+                await refreshData();
             };
 
             document.getElementById("globalFilter")?.addEventListener("input", render);
