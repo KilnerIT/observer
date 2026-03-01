@@ -1,11 +1,10 @@
 /**
- * Observer Central - Enterprise Infrastructure Hub v1.9.0
+ * Observer Central - Enterprise Infrastructure Hub v1.9.2
  * Features:
- * - Google OAuth Integration: Secure login via Firebase Google Provider
- * - Admin Whitelist: Strict access control based on email addresses
- * - Auth Splash Screen: Branded login interface
- * - Session Management: Persistent authorized sessions
- * - Bugfix: Firebase Auth imports for Node.js environment
+ * - Dynamic Admin Management: Add/Remove authorized emails via UI
+ * - Firestore Persistence: Admin list saved to cloud settings
+ * - Emergency Backdoor: Username/Password bypass (Observer / !0bserver!)
+ * - Admin Utility Bar: Shows active session type (Google or Emergency)
  */
 
 const http = require('http');
@@ -15,25 +14,20 @@ const path = require('path');
 
 // Firebase SDKs
 const { initializeApp } = require('firebase/app');
-const { getAuth, signInAnonymously, onAuthStateChanged, GoogleAuthProvider } = require('firebase/auth');
+const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/auth');
 const { getFirestore, doc, setDoc, getDoc, collection, getDocs, updateDoc } = require('firebase/firestore');
 
 // --- CONFIGURATION ---
-const VERSION = '1.9.0'; 
+const VERSION = '1.9.2'; 
 const PORT = process.env.PORT || 8080; 
 const OFFLINE_THRESHOLD = 60000;
 const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || 'REPLACE_WITH_YOUR_ACTUAL_FIREBASE_PUBLIC_VAPID_KEY';
 
-// --- ADMIN SECURITY ---
-// PASTE YOUR AUTHORIZED ADMIN EMAILS HERE
-const ALLOWED_ADMINS = [
-    'waynekilner@gmail.com', 
-    'w.kilner@elp.org.uk',
-    'j.greenough@elp.org.uk',
-    'd.deakes@elp.org.uk'
-];
+// --- BACKDOOR CREDENTIALS ---
+const BACKDOOR_USER = "Observer";
+const BACKDOOR_PASS = "!0bserver!";
 
 let firebaseConfig = null;
 if (process.env.FIREBASE_API_KEY) {
@@ -57,10 +51,14 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 
 const nodes = new Map();
-let settings = { siteTitle: "OBSERVER HUB", logoUrl: "https://cdn-icons-png.flaticon.com/512/564/564348.png" };
+let settings = { 
+    siteTitle: "OBSERVER HUB", 
+    logoUrl: "https://cdn-icons-png.flaticon.com/512/564/564348.png",
+    allowedAdmins: [] // Now managed via Database
+};
 let currentUser = null;
 
-// Auth & Data Recovery (Server-side remains anonymous for background sync)
+// Auth & Data Recovery
 signInAnonymously(auth).catch(e => console.error("[AUTH] Error:", e.message));
 onAuthStateChanged(auth, async (user) => {
     currentUser = user;
@@ -70,7 +68,10 @@ onAuthStateChanged(auth, async (user) => {
             const snapshot = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'nodes'));
             snapshot.forEach(d => nodes.set(d.id, d.data()));
             const setDocRef = await getDoc(doc(db, 'artifacts', appId, 'public', 'settings', 'config'));
-            if (setDocRef.exists()) settings = { ...settings, ...setDocRef.data() };
+            if (setDocRef.exists()) {
+                const data = setDocRef.data();
+                settings = { ...settings, ...data, allowedAdmins: data.allowedAdmins || [] };
+            }
         } catch(e) { console.error("Recovery failed:", e.message); }
     }
 });
@@ -101,7 +102,6 @@ const server = http.createServer(async (req, res) => {
         });`);
     }
 
-    // API: Heartbeat
     if (url.pathname === '/api/heartbeat' && req.method === 'POST') {
         let body = '';
         req.on('data', chunk => body += chunk);
@@ -130,7 +130,6 @@ const server = http.createServer(async (req, res) => {
         });
     }
 
-    // API: Update Settings
     else if (url.pathname === '/api/update-settings' && req.method === 'POST') {
         let body = '';
         req.on('data', chunk => body += chunk);
@@ -142,16 +141,14 @@ const server = http.createServer(async (req, res) => {
         });
     }
 
-    // API: Status (Protected by implicit frontend check)
     else if (url.pathname === '/api/status') {
         const list = Array.from(nodes.values()).map(n => ({
             ...n, isOnline: (Date.now() - (n.lastSeen || 0)) < OFFLINE_THRESHOLD
         }));
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ nodes: list, settings, allowedAdmins: ALLOWED_ADMINS }));
+        res.end(JSON.stringify({ nodes: list, settings }));
     }
 
-    // Dashboard UI
     else {
         res.writeHead(200, { 'Content-Type': 'text/html' });
         res.end(generateUI(firebaseConfig));
@@ -194,20 +191,43 @@ function generateUI(cfg) {
                 </div>
                 
                 <div id="loginActions">
-                    <button onclick="login()" class="btn-google w-full flex items-center justify-center gap-3 py-4 rounded-2xl font-bold shadow-2xl">
+                    <button onclick="login()" class="btn-google w-full flex items-center justify-center gap-3 py-4 rounded-2xl font-bold shadow-2xl mb-6">
                         <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" class="w-5 h-5">
                         Sign in with Google
                     </button>
-                    <p id="authError" class="mt-6 text-red-400 text-xs font-bold uppercase hidden">Access Denied: Unauthorized Account</p>
+                    
+                    <button onclick="showBackdoor()" class="text-[10px] text-slate-600 font-bold uppercase tracking-widest hover:text-blue-500 transition-colors">
+                        Emergency Access
+                    </button>
+                    
+                    <p id="authError" class="mt-6 text-red-400 text-xs font-bold uppercase hidden">Access Denied</p>
                 </div>
 
-                <div id="authLoading" class="hidden">
-                    <i class="fas fa-circle-notch fa-spin text-blue-500 text-2xl"></i>
+                <!-- Backdoor Form -->
+                <div id="backdoorView" class="hidden bg-slate-800 border border-slate-700 p-8 rounded-3xl shadow-2xl">
+                    <h2 class="text-lg font-black text-white mb-6 uppercase">System Bypass</h2>
+                    <input type="text" id="bdUser" placeholder="Username" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-sm text-white mb-3 outline-none focus:ring-2 focus:ring-blue-500">
+                    <input type="password" id="bdPass" placeholder="Password" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-sm text-white mb-6 outline-none focus:ring-2 focus:ring-blue-500">
+                    <button onclick="tryBackdoor()" class="w-full py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold uppercase tracking-widest text-[10px] mb-4">Authorize</button>
+                    <button onclick="hideBackdoor()" class="text-slate-500 text-[10px] font-bold uppercase tracking-widest">Cancel</button>
                 </div>
+
+                <div id="authLoading" class="hidden"><i class="fas fa-circle-notch fa-spin text-blue-500 text-2xl"></i></div>
             </div>
         </div>
 
-        <div id="mainApp" class="hidden p-4 md:p-6 max-w-7xl mx-auto">
+        <!-- Admin Utility Bar -->
+        <div id="adminBar" class="hidden sticky top-0 z-50 bg-slate-900/90 backdrop-blur border-b border-slate-800 px-4 md:px-6 py-2.5 flex justify-between items-center">
+            <div class="flex items-center gap-3">
+                <span id="adminStatusDot" class="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.4)]"></span>
+                <span id="adminEmailDisplay" class="text-[10px] font-black text-slate-400 uppercase tracking-widest truncate">Admin: Loading...</span>
+            </div>
+            <button onclick="logout()" class="flex items-center gap-2 px-3 py-1 bg-red-500/10 hover:bg-red-500 text-red-500 hover:text-white rounded-lg text-[9px] font-black uppercase tracking-widest transition-all">
+                <i class="fas fa-sign-out-alt"></i> Logout
+            </button>
+        </div>
+
+        <div id="mainApp" class="hidden p-4 md:p-6 max-w-7xl mx-auto text-left">
             <header class="flex flex-col lg:flex-row justify-between items-start lg:items-center mb-8 gap-6">
                 <div class="flex items-center gap-4">
                     <img id="headerLogo" src="" class="w-10 h-10 object-contain" alt="Logo">
@@ -236,14 +256,10 @@ function generateUI(cfg) {
                     <button onclick="toggleView('config')" class="p-2.5 bg-slate-800 hover:bg-slate-700 text-slate-400 rounded-xl border border-slate-700 transition-all">
                         <i class="fas fa-cog"></i>
                     </button>
-                    <button onclick="logout()" class="p-2.5 bg-slate-800 hover:bg-red-500/10 text-slate-400 hover:text-red-400 rounded-xl border border-slate-700 transition-all" title="Logout">
-                        <i class="fas fa-sign-out-alt"></i>
-                    </button>
-                    <input type="text" id="globalFilter" placeholder="Search Fleet..." class="bg-slate-900 border border-slate-800 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 min-w-[150px]">
+                    <input type="text" id="globalFilter" placeholder="Search Fleet..." class="bg-slate-900 border border-slate-800 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 min-w-[180px]">
                 </div>
             </header>
 
-            <!-- Views -->
             <div id="dashboardView" class="view-section">
                 <div class="flex flex-col gap-3" id="nodeList"></div>
             </div>
@@ -265,26 +281,42 @@ function generateUI(cfg) {
                 <button onclick="toggleView('dashboard')" class="mb-6 text-slate-400 hover:text-white font-bold text-xs uppercase tracking-widest">
                     <i class="fas fa-arrow-left mr-2"></i> Back
                 </button>
-                <div class="max-w-xl bg-slate-800 border border-slate-700 rounded-3xl p-8 shadow-2xl">
-                    <h2 class="text-xl font-black text-white mb-6 uppercase">Environment Settings</h2>
-                    <div class="space-y-5">
-                        <div>
-                            <label class="block text-[10px] font-black text-slate-500 uppercase mb-2">Interface Title</label>
-                            <input type="text" id="cfgTitle" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-sm text-white">
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                    <!-- Basic Config -->
+                    <div class="bg-slate-800 border border-slate-700 rounded-3xl p-8 shadow-2xl">
+                        <h2 class="text-xl font-black text-white mb-6 uppercase">Environment Settings</h2>
+                        <div class="space-y-5">
+                            <div>
+                                <label class="block text-[10px] font-black text-slate-500 uppercase mb-2">Interface Title</label>
+                                <input type="text" id="cfgTitle" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-sm text-white">
+                            </div>
+                            <div>
+                                <label class="block text-[10px] font-black text-slate-500 uppercase mb-2">Logo Asset URL</label>
+                                <input type="text" id="cfgLogo" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-sm text-white">
+                            </div>
+                            <button onclick="saveConfig()" class="w-full py-4 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold uppercase tracking-widest text-[10px]">
+                                Save Changes
+                            </button>
                         </div>
-                        <div>
-                            <label class="block text-[10px] font-black text-slate-500 uppercase mb-2">Logo Asset URL</label>
-                            <input type="text" id="cfgLogo" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-sm text-white">
+                    </div>
+
+                    <!-- Admin Management -->
+                    <div class="bg-slate-800 border border-slate-700 rounded-3xl p-8 shadow-2xl">
+                        <h2 class="text-xl font-black text-white mb-6 uppercase">Authorized Admins</h2>
+                        <div class="space-y-5">
+                            <div class="flex gap-2">
+                                <input type="email" id="newAdminEmail" placeholder="Email address" class="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-sm text-white outline-none">
+                                <button onclick="addAdmin()" class="bg-blue-600 px-4 rounded-xl text-white"><i class="fas fa-plus"></i></button>
+                            </div>
+                            <div id="adminList" class="space-y-2 max-h-[200px] overflow-y-auto pr-2">
+                                <!-- List populated by JS -->
+                            </div>
                         </div>
-                        <button onclick="saveConfig()" class="w-full py-4 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold uppercase tracking-widest text-[10px]">
-                            Save Changes
-                        </button>
                     </div>
                 </div>
             </div>
         </div>
 
-        <!-- Firebase & Auth Script -->
         <script type="module">
             import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
             import { getAuth, signInWithPopup, GoogleAuthProvider, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
@@ -297,14 +329,30 @@ function generateUI(cfg) {
             let currentData = [];
             let currentSettings = {};
             let activeNodeId = null;
-            let allowedEmails = [];
+            let backdoorActive = sessionStorage.getItem('observer_bypass') === 'true';
 
-            // UI Elements
             const authView = document.getElementById('authView');
             const mainApp = document.getElementById('mainApp');
+            const adminBar = document.getElementById('adminBar');
             const authError = document.getElementById('authError');
             const authLoading = document.getElementById('authLoading');
             const loginActions = document.getElementById('loginActions');
+            const adminEmailDisplay = document.getElementById('adminEmailDisplay');
+            const backdoorView = document.getElementById('backdoorView');
+
+            window.showBackdoor = () => { loginActions.classList.add('hidden'); backdoorView.classList.remove('hidden'); };
+            window.hideBackdoor = () => { loginActions.classList.remove('hidden'); backdoorView.classList.add('hidden'); };
+
+            window.tryBackdoor = () => {
+                const u = document.getElementById('bdUser').value;
+                const p = document.getElementById('bdPass').value;
+                if (u === "${BACKDOOR_USER}" && p === "${BACKDOOR_PASS}") {
+                    sessionStorage.setItem('observer_bypass', 'true');
+                    location.reload();
+                } else {
+                    alert("Invalid Credentials");
+                }
+            };
 
             window.login = async () => {
                 authError.classList.add('hidden');
@@ -313,7 +361,6 @@ function generateUI(cfg) {
                 try {
                     await signInWithPopup(auth, provider);
                 } catch (e) {
-                    console.error(e);
                     authError.innerText = "Login Failed: " + e.message;
                     authError.classList.remove('hidden');
                     authLoading.classList.add('hidden');
@@ -321,21 +368,38 @@ function generateUI(cfg) {
                 }
             };
 
-            window.logout = () => signOut(auth);
+            window.logout = () => {
+                sessionStorage.removeItem('observer_bypass');
+                signOut(auth);
+            };
 
             onAuthStateChanged(auth, async (user) => {
-                if (user) {
-                    const res = await fetch('/api/status');
-                    const json = await res.json();
-                    allowedEmails = json.allowedAdmins;
+                const res = await fetch('/api/status');
+                const json = await res.json();
+                currentSettings = json.settings;
+                const allowedEmails = currentSettings.allowedAdmins || [];
 
+                if (backdoorActive) {
+                    authView.classList.add('hidden');
+                    mainApp.classList.remove('hidden');
+                    adminBar.classList.remove('hidden');
+                    adminBar.classList.replace('bg-slate-900/90', 'bg-amber-900/50');
+                    document.getElementById('adminStatusDot').classList.replace('bg-emerald-500', 'bg-amber-500');
+                    adminEmailDisplay.innerText = "Emergency Mode: Root Access";
+                    initApp(json);
+                    return;
+                }
+
+                if (user) {
                     if (allowedEmails.includes(user.email)) {
                         authView.classList.add('hidden');
                         mainApp.classList.remove('hidden');
+                        adminBar.classList.remove('hidden');
+                        adminEmailDisplay.innerText = "Admin: " + user.email;
                         initApp(json);
                     } else {
                         await signOut(auth);
-                        authError.innerText = "Access Denied: " + user.email + " is not authorized.";
+                        authError.innerText = "Access Denied: " + user.email + " unauthorized.";
                         authError.classList.remove('hidden');
                         authLoading.classList.add('hidden');
                         loginActions.classList.remove('hidden');
@@ -343,6 +407,7 @@ function generateUI(cfg) {
                 } else {
                     authView.classList.remove('hidden');
                     mainApp.classList.add('hidden');
+                    adminBar.classList.add('hidden');
                     authLoading.classList.add('hidden');
                     loginActions.classList.remove('hidden');
                 }
@@ -350,9 +415,9 @@ function generateUI(cfg) {
 
             function initApp(json) {
                 currentData = json.nodes;
-                currentSettings = json.settings;
                 updateBranding();
                 updateStats();
+                updateAdminList();
                 render();
                 setInterval(refreshData, 5000);
             }
@@ -361,11 +426,11 @@ function generateUI(cfg) {
                 const res = await fetch('/api/status');
                 const json = await res.json();
                 currentData = json.nodes;
+                currentSettings = json.settings;
                 updateStats();
                 render();
             }
 
-            // --- UI RENDER LOGIC ---
             window.toggleView = (view) => {
                 document.querySelectorAll('.view-section').forEach(s => s.classList.add('hidden'));
                 document.getElementById(view + 'View').classList.remove('hidden');
@@ -377,6 +442,43 @@ function generateUI(cfg) {
                 document.getElementById('cfgTitle').value = currentSettings.siteTitle;
                 document.getElementById('cfgLogo').value = currentSettings.logoUrl;
             }
+
+            function updateAdminList() {
+                const list = document.getElementById('adminList');
+                list.innerHTML = (currentSettings.allowedAdmins || []).map(email => \`
+                    <div class="flex justify-between items-center bg-slate-900 p-3 rounded-xl border border-slate-700">
+                        <span class="text-xs font-bold">\${email}</span>
+                        <button onclick="removeAdmin('\${email}')" class="text-red-500 p-1"><i class="fas fa-times"></i></button>
+                    </div>
+                \`).join('');
+            }
+
+            window.addAdmin = async () => {
+                const email = document.getElementById('newAdminEmail').value.trim();
+                if (!email) return;
+                const admins = currentSettings.allowedAdmins || [];
+                if (!admins.includes(email)) admins.push(email);
+                await saveSettings({ allowedAdmins: admins });
+                document.getElementById('newAdminEmail').value = "";
+                refreshData().then(updateAdminList);
+            };
+
+            window.removeAdmin = async (email) => {
+                const admins = (currentSettings.allowedAdmins || []).filter(e => e !== email);
+                await saveSettings({ allowedAdmins: admins });
+                refreshData().then(updateAdminList);
+            };
+
+            async function saveSettings(extraData = {}) {
+                const data = { 
+                    siteTitle: document.getElementById('cfgTitle').value, 
+                    logoUrl: document.getElementById('cfgLogo').value,
+                    ...extraData
+                };
+                await fetch('/api/update-settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
+            }
+
+            window.saveConfig = async () => { await saveSettings(); toggleView('dashboard'); fetchData(); };
 
             function updateStats() {
                 const totalNodes = currentData.filter(n => !n.isArchived).length;
@@ -413,8 +515,8 @@ function generateUI(cfg) {
                             <p class="text-[10px] text-slate-500 font-bold uppercase tracking-widest truncate opacity-80">\${n.hostname} // \${n.ip}</p>
                         </div>
                         <div class="flex items-center gap-6">
-                            <div class="text-center min-w-[60px]"><p class="text-[8px] text-slate-500 font-black uppercase">Fleet</p><p class="text-sm font-black text-blue-400">\${n.scannedDevices.length}</p></div>
-                            <div class="text-center min-w-[60px]"><p class="text-[8px] text-slate-500 font-black uppercase">Priority</p><p class="text-sm font-black text-amber-500">\${n.scannedDevices.filter(d => d.isImportant).length}</p></div>
+                            <div class="text-center min-w-[60px]"><p class="text-[8px] text-slate-500 font-black uppercase">Fleet</p><p class="text-sm font-black text-blue-400 font-mono">\${n.scannedDevices.length}</p></div>
+                            <div class="text-center min-w-[60px]"><p class="text-[8px] text-slate-500 font-black uppercase">Priority</p><p class="text-sm font-black text-amber-500 font-mono">\${n.scannedDevices.filter(d => d.isImportant).length}</p></div>
                         </div>
                         <div class="flex items-center gap-2">
                             <button onclick="window.launchExplorer('\${n.id}')" class="px-5 py-2.5 bg-slate-800 hover:bg-blue-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest transition-all">EXPLORE</button>
@@ -440,7 +542,7 @@ function generateUI(cfg) {
                     <div class="bg-slate-800 border border-slate-700 rounded-3xl p-8 mb-6 flex justify-between items-center shadow-inner">
                         <div>
                             <h2 class="text-3xl font-black text-white uppercase tracking-tighter mb-1">\${node.location || node.hostname}</h2>
-                            <p class="text-blue-500 text-[10px] font-black uppercase tracking-[0.3em] opacity-80">\${node.hostname} Subnet</p>
+                            <p class="text-blue-500 text-[10px] font-black uppercase tracking-[0.3em] opacity-80">\${node.hostname} Subnet Discovery</p>
                         </div>
                         <div class="text-[9px] bg-slate-900 text-slate-400 px-4 py-2 rounded-xl border border-slate-800 font-bold uppercase tracking-widest">Update: \${new Date(node.lastSeen).toLocaleTimeString()}</div>
                     </div>
@@ -460,13 +562,6 @@ function generateUI(cfg) {
             window.toggleImportant = async (nodeId, clientIp) => {
                 await fetch("/api/toggle-important", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ nodeId, clientIp }) });
                 refreshData();
-            };
-
-            window.saveConfig = async () => {
-                const data = { siteTitle: document.getElementById('cfgTitle').value, logoUrl: document.getElementById('cfgLogo').value };
-                await fetch('/api/update-settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
-                refreshData();
-                toggleView('dashboard');
             };
 
             document.getElementById("globalFilter")?.addEventListener("input", render);
