@@ -1,15 +1,15 @@
 /**
- * Observer Central - Enterprise Infrastructure Hub v1.8.1
+ * Observer Central - Enterprise Infrastructure Hub v1.8.2
  * Features:
- * - Bugfix: Corrected Firebase Auth imports to resolve 'getAuth' crash
- * - High-Density List View: Optimized for large fleets with reduced whitespace
+ * - Google Chat Webhook Integration: Instant alerts for Node Up/Down events
+ * - High-Density List View: Optimized for large fleets
  * - Global Stats Bar: Total Nodes, Total Clients, and Priority Asset counts
- * - Prominent Left-Aligned Status: Instant visibility of node health
- * - Site-Centric Labeling: Prioritizes Location/Site titles over hostnames
- * - System Config: Customizable branding via UI
+ * - Site-Centric Labeling: Prioritizes Location/Site titles
+ * - Firebase Persistent Settings & Storage
  */
 
 const http = require('http');
+const https = require('https'); // Required for outgoing Webhook calls
 const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -20,11 +20,12 @@ const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/aut
 const { getFirestore, doc, setDoc, getDoc, collection, getDocs, updateDoc } = require('firebase/firestore');
 
 // --- CONFIGURATION ---
-const VERSION = '1.8.1'; 
+const VERSION = '1.8.2'; 
 const PORT = process.env.PORT || 8080; 
 const OFFLINE_THRESHOLD = 60000;
-const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
-const CONFIG_PATH = path.join(__dirname, 'config.json');
+const DASHBOARD_URL = 'https://observer-sxv0.onrender.com';
+const GCHAT_WEBHOOK = 'https://chat.googleapis.com/v1/spaces/AAQA6gvsbXw/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=u5n0S4cRM8UoDk27DUgUATSUxnazlIMangV1S1_AJZ8';
+
 const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || 'REPLACE_WITH_YOUR_ACTUAL_FIREBASE_PUBLIC_VAPID_KEY';
 
 let firebaseConfig = null;
@@ -37,9 +38,9 @@ if (process.env.FIREBASE_API_KEY) {
         messagingSenderId: process.env.FIREBASE_SENDER_ID,
         appId: process.env.FIREBASE_APP_ID
     };
-} else if (fs.existsSync(CONFIG_PATH)) {
+} else if (fs.existsSync(path.join(__dirname, 'config.json'))) {
     try {
-        firebaseConfig = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+        firebaseConfig = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8'));
     } catch(e) { console.error("Config parse failed"); }
 }
 
@@ -49,6 +50,7 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 
 const nodes = new Map();
+const nodeStates = new Map(); // Track status in-memory to detect transitions
 let settings = { siteTitle: "OBSERVER HUB", logoUrl: "https://cdn-icons-png.flaticon.com/512/564/564348.png" };
 let currentUser = null;
 
@@ -60,12 +62,85 @@ onAuthStateChanged(auth, async (user) => {
         console.log(`[SYSTEM] Authenticated. Loading persistence for ${appId}...`);
         try {
             const snapshot = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'nodes'));
-            snapshot.forEach(d => nodes.set(d.id, d.data()));
+            snapshot.forEach(d => {
+                const data = d.data();
+                nodes.set(d.id, data);
+                // Initialize state tracker
+                nodeStates.set(d.id, (Date.now() - (data.lastSeen || 0)) < OFFLINE_THRESHOLD);
+            });
             const setDocRef = await getDoc(doc(db, 'artifacts', appId, 'public', 'settings', 'config'));
             if (setDocRef.exists()) settings = { ...settings, ...setDocRef.data() };
         } catch(e) { console.error("Recovery failed:", e.message); }
     }
 });
+
+/**
+ * Google Chat Alert Dispatcher
+ * Sends a structured card message to Google Chat via Webhook
+ */
+function sendGoogleChatAlert(node, isOnline) {
+    const statusText = isOnline ? "ONLINE (Recovered)" : "OFFLINE (Unreachable)";
+    const statusColor = isOnline ? "#22c55e" : "#ef4444";
+    const siteName = node.location || node.hostname || "Unknown Site";
+
+    const payload = JSON.stringify({
+        cards: [{
+            header: {
+                title: "Observer Central Alert",
+                subtitle: "Infrastructure Health Monitor",
+                imageUrl: settings.logoUrl
+            },
+            sections: [{
+                widgets: [
+                    { "textParagraph": { "text": `<b>Site:</b> ${siteName}<br><b>Host:</b> ${node.hostname}<br><b>Status:</b> <font color="${statusColor}">${statusText}</font>` } },
+                    {
+                        "buttons": [{
+                            "textButton": {
+                                "text": "VIEW DASHBOARD",
+                                "onClick": { "openLink": { "url": DASHBOARD_URL } }
+                            }
+                        }]
+                    }
+                ]
+            }]
+        }]
+    });
+
+    const url = new URL(GCHAT_WEBHOOK);
+    const options = {
+        hostname: url.hostname,
+        path: url.pathname + url.search,
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json; charset=UTF-8',
+            'Content-Length': Buffer.byteLength(payload)
+        }
+    };
+
+    const req = https.request(options);
+    req.on('error', (e) => console.error(`[WEBHOOK ERROR] ${e.message}`));
+    req.write(payload);
+    req.end();
+}
+
+/**
+ * Health Monitor Loop
+ * Checks node heartbeats every 10 seconds to detect state changes
+ */
+setInterval(() => {
+    nodes.forEach((node, id) => {
+        const isOnline = (Date.now() - (node.lastSeen || 0)) < OFFLINE_THRESHOLD;
+        const previousState = nodeStates.get(id);
+
+        // State Transition Detection (Online -> Offline OR Offline -> Online)
+        if (previousState !== undefined && previousState !== isOnline) {
+            console.log(`[ALERT] Node ${node.hostname} transitioned to ${isOnline ? 'ONLINE' : 'OFFLINE'}`);
+            sendGoogleChatAlert(node, isOnline);
+        }
+        
+        nodeStates.set(id, isOnline);
+    });
+}, 10000);
 
 const server = http.createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -129,7 +204,7 @@ const server = http.createServer(async (req, res) => {
         req.on('end', async () => {
             const data = JSON.parse(body);
             settings = { ...settings, ...data };
-            if (currentUser) setDoc(doc(db, 'artifacts', appId, 'public', settings, 'config'), settings);
+            if (currentUser) setDoc(doc(db, 'artifacts', appId, 'public', 'settings', 'config'), settings);
             res.writeHead(200); res.end(JSON.stringify({ status: 'updated' }));
         });
     }
