@@ -1,11 +1,11 @@
 /**
- * Observer Central - Enterprise Infrastructure Hub v2.3.1
+ * Observer Central - Enterprise Infrastructure Hub v2.4.0
  * Features:
+ * - Maintenance Windows: 2-hour alert silencing with UI toggle and visual indicator
+ * - Network Topology: Hub-and-spoke SVG visualization for asset relationships
+ * - Vulnerability Analysis: Automated flagging of risky ports (RDP, FTP, Telnet, etc.)
  * - Industrial Palette: Obsidian and Carbon Greys with Safety Orange highlights
- * - Admin Management: Full UI-based Access Control List (ACL) for MFA/OAuth
- * - Smart Thresholds: CPU, RAM, and Disk color-coding (75% Amber, 95% Red)
- * - Dynamic Sparklines: Trend lines inherit status colors
- * - Navigation: Persistent Home access and improved Settings workflow
+ * - Access Control: Persistent MFA/OAuth administrator management
  */
 
 const http = require('http');
@@ -19,7 +19,7 @@ const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/aut
 const { getFirestore, doc, setDoc, getDoc, collection, getDocs, updateDoc, addDoc, query, limit } = require('firebase/firestore');
 
 // --- CONFIGURATION ---
-const VERSION = '2.3.1'; 
+const VERSION = '2.4.0'; 
 const PORT = process.env.PORT || 8080; 
 const OFFLINE_THRESHOLD = 60000;
 const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
@@ -160,6 +160,23 @@ const server = http.createServer(async (req, res) => {
         });
     }
 
+    else if (url.pathname === '/api/set-maintenance' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', async () => {
+            const { nodeId, durationHours, adminEmail } = JSON.parse(body);
+            const node = nodes.get(nodeId);
+            if (node) {
+                const until = durationHours > 0 ? Date.now() + (durationHours * 3600000) : 0;
+                node.maintenanceUntil = until;
+                nodes.set(nodeId, node);
+                if (currentUser) updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'nodes', nodeId), { maintenanceUntil: until });
+                await logAction(adminEmail, until > 0 ? `Set Maintenance (${durationHours}h)` : "Cleared Maintenance", node.location || nodeId);
+            }
+            res.writeHead(200); res.end(JSON.stringify({ status: 'ok' }));
+        });
+    }
+
     else if (url.pathname === '/api/update-settings' && req.method === 'POST') {
         let body = '';
         req.on('data', chunk => body += chunk);
@@ -221,6 +238,10 @@ function generateUI(cfg) {
             .btn-primary:hover { background: #fb923c; }
             .accent-orange { color: #f97316; }
             .border-orange { border-color: #f97316 !important; }
+            .risk-badge { background: #ef4444; color: white; padding: 2px 6px; border-radius: 4px; font-size: 7px; font-weight: 900; text-transform: uppercase; }
+            .topology-line { stroke: #333333; stroke-width: 1; stroke-dasharray: 4; }
+            .topology-node { fill: #262626; stroke: #f97316; stroke-width: 2; }
+            .topology-center { fill: #f97316; }
         </style>
     </head>
     <body class="min-h-screen flex flex-col antialiased">
@@ -270,27 +291,15 @@ function generateUI(cfg) {
             <div id="configView" class="view-section hidden text-left">
                 <button onclick="toggleView('dashboard')" class="mb-6 text-neutral-500 hover:text-[#f97316] font-bold text-[10px] uppercase tracking-widest"><i class="fas fa-arrow-left mr-2"></i> Dashboard</button>
                 <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
-                    <!-- Identity Panel -->
                     <div class="bg-[#262626] border border-[#333333] rounded-2xl p-8">
                         <h2 class="text-xs font-black text-white mb-6 uppercase tracking-widest">Identity & Alerts</h2>
                         <div class="space-y-4">
-                            <div>
-                                <label class="block text-[9px] font-bold text-neutral-500 uppercase mb-2">Network Alias</label>
-                                <input type="text" id="cfgTitle" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-lg px-4 py-2 text-xs text-white" placeholder="Network Alias">
-                            </div>
-                            <div>
-                                <label class="block text-[9px] font-bold text-neutral-500 uppercase mb-2">Logo Asset URL</label>
-                                <input type="text" id="cfgLogo" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-lg px-4 py-2 text-xs text-white" placeholder="Logo URL">
-                            </div>
-                            <div>
-                                <label class="block text-[9px] font-bold text-neutral-500 uppercase mb-2">Google Chat Webhook</label>
-                                <input type="text" id="cfgWebhook" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-lg px-4 py-2 text-xs text-white" placeholder="Webhook">
-                            </div>
-                            <button onclick="saveConfig()" class="w-full py-3 btn-primary rounded-lg font-black uppercase text-[10px] transition-all">Apply Global Changes</button>
+                            <input type="text" id="cfgTitle" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-lg px-4 py-2 text-xs text-white" placeholder="Network Alias">
+                            <input type="text" id="cfgLogo" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-lg px-4 py-2 text-xs text-white" placeholder="Logo URL">
+                            <input type="text" id="cfgWebhook" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-lg px-4 py-2 text-xs text-white" placeholder="Webhook">
+                            <button onclick="saveConfig()" class="w-full py-3 btn-primary rounded-lg font-black uppercase text-[10px]">Apply Global Changes</button>
                         </div>
                     </div>
-
-                    <!-- Access Panel -->
                     <div class="bg-[#262626] border border-[#333333] rounded-2xl p-8">
                         <h2 class="text-xs font-black text-white mb-6 uppercase tracking-widest">Access Control (MFA)</h2>
                         <div class="space-y-4">
@@ -298,15 +307,10 @@ function generateUI(cfg) {
                                 <input type="email" id="newAdminEmail" class="flex-1 bg-[#1a1a1a] border border-[#333333] rounded-lg px-4 py-2 text-xs text-white" placeholder="user@domain.com">
                                 <button onclick="window.addAdmin()" class="px-4 bg-[#333333] hover:bg-[#444] text-white rounded-lg text-xs transition-all"><i class="fas fa-plus"></i></button>
                             </div>
-                            <div id="adminList" class="space-y-2 max-h-[160px] overflow-y-auto pr-2">
-                                <!-- Populated by JS -->
-                            </div>
-                            <p class="text-[8px] text-neutral-600 uppercase font-bold tracking-tighter">Only accounts listed above can authenticate via Google OAuth.</p>
+                            <div id="adminList" class="space-y-2 max-h-[160px] overflow-y-auto pr-2"></div>
                         </div>
                     </div>
                 </div>
-
-                <!-- Audit Log Panel -->
                 <div class="bg-[#262626] border border-[#333333] rounded-2xl p-8">
                     <h2 class="text-xs font-black text-white mb-6 uppercase tracking-widest">Administrative Audit Trail</h2>
                     <div id="auditLogList" class="space-y-1 text-[8px] font-mono text-neutral-400"></div>
@@ -332,6 +336,16 @@ function generateUI(cfg) {
             const app = initializeApp(firebaseConfig);
             const auth = getAuth(app);
             const provider = new GoogleAuthProvider();
+
+            // Light Vulnerability Database
+            const RISKY_PORTS = {
+                "21": "FTP (Plaintext Credentials)",
+                "23": "Telnet (Unencrypted Admin Access)",
+                "3389": "RDP (Potential Remote Execution)",
+                "445": "SMB (Vulnerable to EternalBlue)",
+                "139": "NetBIOS (Credential Harvest Risk)",
+                "5900": "VNC (Remote Control Risk)"
+            };
 
             let currentData = [];
             let currentSettings = {};
@@ -366,9 +380,9 @@ function generateUI(cfg) {
             }
 
             function getStatusColor(val) {
-                if (val >= 95) return '#ef4444'; // Red
-                if (val >= 75) return '#f59e0b'; // Amber
-                return '#f97316'; // Orange
+                if (val >= 95) return '#ef4444';
+                if (val >= 75) return '#f59e0b';
+                return '#f97316';
             }
 
             function generateSparkline(history, key, w=50, h=20, cls='sparkline') {
@@ -424,40 +438,13 @@ function generateUI(cfg) {
                 \`).join('');
             }
 
-            window.addAdmin = async () => {
-                const emailInput = document.getElementById('newAdminEmail');
-                const email = emailInput.value.trim();
-                if(!email) return;
-                const admins = [...(currentSettings.allowedAdmins || [])];
-                if(!admins.includes(email)) admins.push(email);
-                await saveSettings({ allowedAdmins: admins });
-                emailInput.value = "";
-                await refreshData();
-            };
-
-            window.removeAdmin = async (email) => {
-                const admins = (currentSettings.allowedAdmins || []).filter(e => e !== email);
-                await saveSettings({ allowedAdmins: admins });
-                await refreshData();
-            };
-
-            async function refreshData() {
+            window.setMaintenance = async (id, hours) => {
+                const adminEmail = document.getElementById('adminEmailDisplay').innerText;
+                await fetch('/api/set-maintenance', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ nodeId: id, durationHours: hours, adminEmail }) });
                 const r = await fetch('/api/status');
                 const j = await r.json();
-                currentSettings = j.settings;
-                updateAdminList();
-            }
-
-            function updateBranding() {
-                document.getElementById('headerTitle').innerText = currentSettings.siteTitle || "HUB";
-                document.getElementById('headerLogo').src = currentSettings.logoUrl || "";
-            }
-
-            window.toggleView = (view) => {
-                document.querySelectorAll('.view-section').forEach(s => s.classList.add('hidden'));
-                document.getElementById(view + 'View').classList.remove('hidden');
-                activeNodeId = (view === 'dashboard') ? null : activeNodeId;
-                if (view === 'config') updateAdminList();
+                currentData = j.nodes;
+                render();
             };
 
             function renderList(filter) {
@@ -465,11 +452,13 @@ function generateUI(cfg) {
                 const filtered = currentData.filter(n => !n.isArchived && ((n.hostname || "").toLowerCase().includes(filter) || (n.location || "").toLowerCase().includes(filter)))
                     .sort((a, b) => (b.isOnline ? 1 : 0) - (a.isOnline ? 1 : 0));
 
-                list.innerHTML = filtered.map(n => \`
-                    <div class="node-row rounded-xl p-4 flex items-center gap-6 text-left">
-                        <div class="w-1.5 h-1.5 rounded-full \${n.isOnline ? 'bg-emerald-500' : 'bg-red-500'}"></div>
+                list.innerHTML = filtered.map(n => {
+                    const isMaint = n.maintenanceUntil && n.maintenanceUntil > Date.now();
+                    return \`
+                    <div class="node-row rounded-xl p-4 flex items-center gap-6 text-left relative">
+                        <div class="w-1.5 h-1.5 rounded-full \${n.isOnline ? 'bg-emerald-500 shadow-[0_0_8px_#10b981]' : 'bg-red-500'}"></div>
                         <div class="flex-1 min-w-0">
-                            <h3 class="text-sm font-black text-white uppercase">\${n.location || n.hostname}</h3>
+                            <h3 class="text-sm font-black text-white uppercase">\${n.location || n.hostname} \${isMaint ? '<span class="ml-2 text-[8px] text-amber-500 font-black tracking-widest">[MAINTENANCE]</span>' : ''}</h3>
                             <p class="text-[8px] text-neutral-500 uppercase">\${n.hostname} // \${n.ip}</p>
                         </div>
                         <div class="flex items-center gap-6">
@@ -479,11 +468,46 @@ function generateUI(cfg) {
                                 <p class="text-[9px] font-black accent-orange">\${getUptime(n.uptimeStats, 7)}%</p>
                             </div>
                         </div>
-                        <button onclick="window.launchExplorer('\${n.id}')" class="px-4 py-2 bg-neutral-900 border border-neutral-800 rounded-lg text-[8px] font-black uppercase hover:border-orange transition-colors">Explore</button>
-                    </div>\`).join("");
+                        <div class="flex gap-2">
+                            <button onclick="window.setMaintenance('\${n.id}', \${isMaint ? 0 : 2})" class="p-2 bg-neutral-900 border border-[#333333] rounded-lg text-neutral-600 hover:text-amber-500 transition-colors">
+                                <i class="fas \${isMaint ? 'fa-bell' : 'fa-bell-slash'} text-[10px]"></i>
+                            </button>
+                            <button onclick="window.launchExplorer('\${n.id}')" class="px-4 py-2 bg-neutral-900 border border-neutral-800 rounded-lg text-[8px] font-black uppercase hover:border-orange transition-colors">Explore</button>
+                        </div>
+                    </div>\`;
+                }).join("");
             }
 
             window.launchExplorer = (id) => { activeNodeId = id; toggleView('explorer'); renderExplorer(); };
+
+            function renderTopology(devices) {
+                if (!devices || devices.length === 0) return '';
+                const width = 600;
+                const height = 150;
+                const centerX = width / 2;
+                const centerY = height / 2;
+                const radius = 100;
+                
+                let nodesHtml = \`<circle cx="\${centerX}" cy="\${centerY}" r="8" class="topology-center" />\`;
+                let linesHtml = '';
+
+                devices.slice(0, 12).forEach((d, i) => {
+                    const angle = (i / Math.min(devices.length, 12)) * Math.PI * 2;
+                    const x = centerX + radius * Math.cos(angle);
+                    const y = centerY + radius * Math.sin(angle);
+                    
+                    linesHtml += \`<line x1="\${centerX}" y1="\${centerY}" x2="\${x}" y2="\${y}" class="topology-line" />\`;
+                    nodesHtml += \`<circle cx="\${x}" cy="\${y}" r="4" class="topology-node" />\`;
+                });
+
+                return \`
+                <div class="bg-black/50 border border-[#333333] rounded-3xl p-4 mb-8 flex justify-center overflow-hidden">
+                    <svg width="\${width}" height="\${height}" viewBox="0 0 \${width} \${height}">
+                        \${linesHtml}
+                        \${nodesHtml}
+                    </svg>
+                </div>\`;
+            }
 
             function renderExplorer() {
                 const n = currentData.find(x => x.id === activeNodeId);
@@ -503,7 +527,8 @@ function generateUI(cfg) {
                         <p class="text-neutral-500 text-[10px] font-bold uppercase tracking-widest">\${n.hostname} // Intelligent Telemetry Engine</p>
                     </div>
 
-                    <!-- Metrics Grid -->
+                    \${renderTopology(n.scannedDevices)}
+
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
                         <div class="card-metric rounded-3xl p-8 shadow-2xl relative overflow-hidden \${latestMetric.cpu >= 75 ? 'border-orange' : ''}">
                             <div class="flex justify-between items-start mb-6">
@@ -533,23 +558,30 @@ function generateUI(cfg) {
                         </div>
                     </div>
 
-                    <!-- Discovery Grid -->
                     <div class="bg-neutral-900 border border-neutral-800 rounded-2xl p-6 mb-4">
                         <h3 class="text-xs font-black text-white uppercase mb-6 tracking-widest">Network Asset Map</h3>
                         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                            \${(n.scannedDevices || []).map(c => \`
+                            \${(n.scannedDevices || []).map(c => {
+                                let riskHtml = '';
+                                Object.keys(RISKY_PORTS).forEach(port => {
+                                    if (c.description && c.description.includes(port)) {
+                                        riskHtml = \`<div class="risk-badge mb-2"><i class="fas fa-exclamation-triangle mr-1"></i> Risk: \${RISKY_PORTS[port]}</div>\`;
+                                    }
+                                });
+
+                                return \`
                                 <div class="bg-black border border-neutral-800 p-4 rounded-xl hover:border-orange transition-colors">
+                                    \${riskHtml}
                                     <div class="flex justify-between items-start mb-2">
                                         <span class="text-[9px] font-mono text-neutral-500 font-bold">\${c.ip}</span>
                                         \${c.os_fingerprint ? '<span class="text-[7px] text-neutral-400 font-black uppercase">' + c.os_fingerprint + '</span>' : ''}
                                     </div>
                                     <h4 class="text-xs font-black text-white uppercase truncate mt-1">\${c.name}</h4>
                                     <p class="text-[8px] text-neutral-600 uppercase font-bold mt-1">\${c.description}</p>
-                                </div>
-                            \`).join('')}
+                                </div>\`;
+                            }).join('')}
                         </div>
-                    </div>
-                \`;
+                    </div>\`;
             }
 
             async function saveSettings(extra = {}) {
@@ -571,6 +603,27 @@ function generateUI(cfg) {
             }
 
             window.saveConfig = async () => { await saveSettings(); toggleView('dashboard'); };
+            window.addAdmin = async () => {
+                const emailInput = document.getElementById('newAdminEmail');
+                const email = emailInput.value.trim();
+                if(!email) return;
+                const admins = [...(currentSettings.allowedAdmins || [])];
+                if(!admins.includes(email)) admins.push(email);
+                await saveSettings({ allowedAdmins: admins });
+                emailInput.value = "";
+                const res = await fetch('/api/status');
+                const json = await res.json();
+                currentSettings = json.settings;
+                updateAdminList();
+            };
+            window.removeAdmin = async (email) => {
+                const admins = (currentSettings.allowedAdmins || []).filter(e => e !== email);
+                await saveSettings({ allowedAdmins: admins });
+                const res = await fetch('/api/status');
+                const json = await res.json();
+                currentSettings = json.settings;
+                updateAdminList();
+            };
             document.getElementById("globalFilter").addEventListener("input", render);
         </script>
     </body>
