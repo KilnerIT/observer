@@ -1,141 +1,118 @@
 /**
- * Observer Node Agent v1.6.3
+ * Observer Node Agent v2.0.0
  * Features:
- * - Automated Nmap Service Discovery (-sV)
- * - Robust XML Fingerprinting (Attribute-order independent)
- * - Secure HTTPS communication for Render Cloud
- * - Location Tagging for Node Identification
- * - String Sanitization (Fixes HTTP 400 parsing errors)
- * - Null-safety guards for scan results
+ * - Performance Collection: Captures CPU & RAM utilization
+ * - Advanced OS Fingerprinting: Uses 'nmap -O' for deep detection
+ * - Automated Maintenance Awareness
+ * - Git Synchronization
  */
 
+const http = require('http');
 const https = require('https');
 const os = require('os');
 const { exec, execSync } = require('child_process');
 const crypto = require('crypto');
 
 // --- CONFIGURATION ---
-const VERSION = '1.6.3';
 const SERVER_URL = 'https://observer-sxv0.onrender.com/api/heartbeat';
-const HEARTBEAT_INTERVAL = 30000;   // 30 seconds for health checks
-const SCAN_INTERVAL = 300000;      // 5 minutes for full network scans
-const VERBOSE = true; 
-
-// LOCATION TAG: Set this via environment variable 'OBSERVER_LOCATION'
-const LOCATION = process.env.OBSERVER_LOCATION || 'Remote Site';
-
+const SCAN_INTERVAL = 300000; // 5 minutes
 const clientId = crypto.createHash('md5').update(os.hostname()).digest('hex').substring(0, 8);
 
-let isScanning = false;
-let lastDiscoveryResults = [];
-
 function log(msg, type = 'INFO') {
-    if (!VERBOSE) return;
-    const timestamp = new Date().toLocaleTimeString();
-    console.log(`[${timestamp}] [${type}] ${msg}`);
+    console.log(`[${new Date().toLocaleTimeString()}] [${type}] ${msg}`);
 }
 
 /**
- * Sanitizes strings to prevent JSON parsing errors on the server
+ * Metric Collection
+ * Calculates CPU load and RAM percentage
  */
-function clean(str) {
-    if (typeof str !== 'string') return "";
-    // Remove non-printable characters and extra whitespace
-    return str.replace(/[^\x20-\x7E]/g, '').trim();
+function getPerformanceMetrics() {
+    const totalMem = os.totalmem();
+    const freeMem = os.freemem();
+    const ramUsage = Math.round(((totalMem - freeMem) / totalMem) * 100);
+    
+    // Simplistic CPU load based on loadavg (1-min)
+    const cpuLoad = Math.min(Math.round((os.loadavg()[0] / os.cpus().length) * 100), 100);
+    
+    return { cpu: cpuLoad, ram: ramUsage };
 }
 
 /**
- * Detect local subnet
+ * NMAP FINGERPRINTING LOGIC
+ * Includes -O for OS Fingerprinting (Requires root/admin privileges)
  */
-function getLocalSubnet() {
+function performDiscovery() {
+    log("Scanning local network interface...", "NET");
     const interfaces = os.networkInterfaces();
+    let targetSubnet = '192.168.1.0/24';
+
     for (const name of Object.keys(interfaces)) {
         for (const iface of interfaces[name]) {
             if (iface.family === 'IPv4' && !iface.internal) {
                 const parts = iface.address.split('.');
-                return `${parts[0]}.${parts[1]}.${parts[2]}.0/24`;
+                targetSubnet = `${parts[0]}.${parts[1]}.${parts[2]}.0/24`;
             }
         }
     }
-    return '192.168.1.0/24';
-}
 
-/**
- * NMAP FINGERPRINTING
- * Identifies live hosts and their running services
- */
-function performDiscovery() {
-    if (isScanning) return;
-    isScanning = true;
-
-    const targetSubnet = getLocalSubnet();
-    log(`Starting discovery sweep on ${targetSubnet} (${LOCATION})...`, "NMAP");
-
+    log(`Starting deep OS discovery on ${targetSubnet}...`, "NMAP");
+    
+    // Phase 1: Rapid Ping Sweep
     exec(`nmap -sn ${targetSubnet} -oG -`, (err, stdout) => {
-        if (err) {
-            isScanning = false;
-            return log(`Host discovery failed: ${err.message}`, "ERROR");
-        }
+        if (err) return log(`Scan failed: ${err.message}`, "ERROR");
 
         const hosts = stdout.split('\n')
             .filter(l => l.includes('Status: Up'))
-            .map(l => {
-                const match = l.match(/Host: ([0-9.]+)/);
-                return match ? match[1] : null;
-            })
-            .filter(ip => ip !== null);
+            .map(l => l.match(/Host: ([0-9.]+)/)?.[1])
+            .filter(Boolean);
 
-        if (hosts.length === 0) {
-            log("No live hosts found in subnet.", "NMAP");
-            isScanning = false;
-            return;
-        }
+        if (hosts.length === 0) return log("No hosts found.", "NMAP");
 
-        log(`Found ${hosts.length} live hosts. Fingerprinting services...`, "NMAP");
+        log(`Fingerprinting services and OS for ${hosts.length} targets...`, "NMAP");
         
-        // Phase 2: Service version detection
+        // Phase 2: Deep fingerprinting on discovered hosts
+        // -O: OS detection
+        // -sV: Service detection
         const scanTargets = hosts.slice(0, 10).join(' ');
-        exec(`nmap -sV -F --version-light ${scanTargets} -oX -`, (sErr, sStdout) => {
+        
+        // Note: Running nmap -O usually requires sudo/Administrative rights
+        const sudoPrefix = os.platform() === 'win32' ? '' : 'sudo ';
+        exec(`${sudoPrefix}nmap -sV -O -F --version-light ${scanTargets} -oX -`, (sErr, sStdout) => {
             const results = [];
             
-            if (!sErr && sStdout) {
-                try {
-                    const hostBlocks = sStdout.split('<host ');
-                    hostBlocks.shift(); 
+            if (sErr || !sStdout) return log(`Deep scan failed: ${sErr ? sErr.message : "No data"}`, "ERROR");
 
-                    hostBlocks.forEach(block => {
-                        const ip = (block.match(/addr="([0-9.]+)" addrtype="ipv4"/) || block.match(/addr="([0-9.]+)"/))?.[1];
-                        if (!ip) return;
+            const hostBlocks = sStdout.split('<host ');
+            hostBlocks.shift(); 
 
-                        const serviceName = block.match(/service name="([^"]+)"/)?.[1] || "unknown";
-                        const product = block.match(/product="([^"]+)"/)?.[1] || "";
-                        const version = block.match(/version="([^"]+)"/)?.[1] || "";
-                        const port = block.match(/portid="([0-9]+)"/)?.[1];
-                        
-                        results.push({
-                            ip: clean(ip),
-                            name: clean(product ? `${serviceName} (${product})` : serviceName),
-                            description: clean((version || port) ? `${version ? 'v'+version : ''} ${port ? 'Port: '+port : ''}` : "Online"),
-                            lastSeen: Date.now()
-                        });
+            hostBlocks.forEach(block => {
+                const ip = (block.match(/addr="([0-9.]+)"/) || [])[1];
+                const osMatch = block.match(/osclass vendor="([^"]+)" osfamily="([^"]+)"/);
+                const osFingerprint = osMatch ? `${osMatch[1]} ${osMatch[2]}` : null;
+                
+                const serviceMatch = block.match(/service name="([^"]+)" product="([^"]+)"/);
+                const name = serviceMatch ? `${serviceMatch[1]} (${serviceMatch[2]})` : "Generic Device";
+                const portMatch = block.match(/portid="([0-9]+)"/);
+                
+                if (ip) {
+                    results.push({
+                        ip,
+                        name,
+                        os_fingerprint: osFingerprint,
+                        description: portMatch ? `Port: ${portMatch[1]}` : "Online",
+                        lastSeen: Date.now()
                     });
-                } catch (parseError) {
-                    log("Error parsing Nmap XML: " + parseError.message, "ERROR");
                 }
-            }
+            });
 
-            lastDiscoveryResults = results;
-            isScanning = false;
-            log(`Discovery complete. reporting ${results.length} devices.`, "OK");
-            sendHeartbeat();
+            log(`Deep discovery complete. Reporting ${results.length} endpoints.`, "API");
+            sendPayload(results);
         });
     });
 }
 
-/**
- * Reports metrics to Render server
- */
-function sendHeartbeat() {
+function sendPayload(scannedDevices = []) {
+    const metrics = getPerformanceMetrics();
     const diskCmd = os.platform() === 'win32' 
         ? 'powershell "Get-PSDrive C | Select-Object @{Name=\'Free\';Expression={[Math]::Round($_.Free/1GB,2)}}, @{Name=\'Total\';Expression={[Math]::Round($_.Used/1GB + $_.Free/1GB,2)}} | ConvertTo-Json"'
         : "df -h / | tail -1 | awk '{print \"{\\\"Free\\\":\\\"\"$4\"\\\",\\\"Total\\\":\\\"\"$2\"\\\"}\"}'";
@@ -144,65 +121,40 @@ function sendHeartbeat() {
         let disk = "N/A";
         try {
             const d = JSON.parse(stdout);
-            disk = `${d.Free || d.FreeGB || '0'}GB Free / ${d.Total || d.SizeGB || '0'}GB`;
+            disk = `${d.Free}GB / ${d.Total}GB`;
         } catch(e) {}
 
         const payload = JSON.stringify({
-            id: clean(clientId),
-            version: clean(VERSION),
-            location: clean(LOCATION),
-            hostname: clean(os.hostname()),
-            os: clean(os.type() + ' ' + os.release()),
+            id: clientId,
+            hostname: os.hostname(),
+            os: os.type() + ' ' + os.release(),
             uptime: os.uptime(),
-            disk: clean(disk),
-            scannedDevices: Array.isArray(lastDiscoveryResults) ? lastDiscoveryResults : [],
-            timestamp: Date.now()
+            cpu: metrics.cpu,
+            ram: metrics.ram,
+            disk: disk,
+            scannedDevices: scannedDevices
         });
 
-        const body = Buffer.from(payload, 'utf8');
         const url = new URL(SERVER_URL);
+        const requestModule = url.protocol === 'https:' ? https : http;
         
-        const options = {
+        const req = requestModule.request({
             hostname: url.hostname,
-            port: 443,
             path: url.pathname,
             method: 'POST',
-            headers: { 
-                'Content-Type': 'application/json', 
-                'Content-Length': body.length 
-            }
-        };
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }
+        }, (res) => log(`Sync completed. HTTP ${res.statusCode}`, "API"));
 
-        const req = https.request(options, (res) => {
-            let resData = '';
-            res.on('data', chunk => resData += chunk);
-            res.on('end', () => {
-                if (res.statusCode === 200) {
-                    log(`Check-in successful (HTTP 200)`, "API");
-                } else {
-                    log(`Server Error (HTTP ${res.statusCode}): ${resData}`, "WARN");
-                }
-            });
-        });
-
-        req.on('error', (e) => log(`Connection failed: ${e.message}`, "ERROR"));
-        req.write(body);
+        req.on('error', (e) => log(`Sync failed: ${e.message}`, "ERROR"));
+        req.write(payload);
         req.end();
     });
 }
 
-// Initialization
-console.log("==========================================");
-console.log(` OBSERVER AGENT v${VERSION}`);
-console.log(` Location: ${LOCATION}`);
-console.log(` Node ID: ${clientId}`);
-console.log("==========================================");
-
+// Execution
 performDiscovery();
-sendHeartbeat();
-
-setInterval(sendHeartbeat, HEARTBEAT_INTERVAL);
 setInterval(performDiscovery, SCAN_INTERVAL);
+setInterval(() => sendPayload([]), 30000); 
 
 try {
     execSync('git pull origin main', { stdio: 'ignore' });
