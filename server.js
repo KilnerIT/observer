@@ -1,10 +1,10 @@
 /**
- * Observer Central - Enterprise Infrastructure Hub v2.5.1
- * * EFFICIENCY & RELIABILITY UPDATE:
- * - Hybrid UI Cloud: UI can be hot-swapped via Firestore to bypass Render.com rebuilds.
- * - Robust Local Fallback: Full v2.4.0 features embedded as a secondary safety.
- * - IP Guard: Safe detection of client IPs behind proxies/Render.
- * - Feature Set: Maintenance Windows, Topology Map, and Risk Analysis.
+ * Observer Central - Enterprise Infrastructure Hub v2.6.0
+ * * MAINTENANCE & AGEND UPDATE:
+ * - Maintenance Agenda: New dedicated view to track all silenced nodes and durations.
+ * - Health Protection: Maintenance periods no longer penalize site health/uptime stats.
+ * - Hybrid UI Cloud: Supports hot-swappable front-ends via Firestore.
+ * - Resilience: Maintenance status persists across server restarts via Firebase Sync.
  */
 
 const http = require('http');
@@ -18,7 +18,7 @@ const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/aut
 const { getFirestore, doc, setDoc, getDoc, collection, getDocs, updateDoc, addDoc, query, limit } = require('firebase/firestore');
 
 // --- CONFIGURATION ---
-const VERSION = '2.5.1'; 
+const VERSION = '2.6.0'; 
 const PORT = process.env.PORT || 8080; 
 const OFFLINE_THRESHOLD = 60000;
 const CONFIG_PATH = path.join(__dirname, 'config.json');
@@ -105,11 +105,22 @@ function processUptime(nodeId, data) {
     const existing = nodes.get(nodeId) || {};
     let uptimeStats = existing.uptimeStats || { firstSeen: now, buckets: {} };
     if (!uptimeStats.buckets[today]) uptimeStats.buckets[today] = 0;
+    
     const lastSeen = existing.lastSeen || now;
     const deltaSeconds = Math.floor((now - lastSeen) / 1000);
+    
+    // Check if node is in maintenance
+    const inMaintenance = existing.maintenanceUntil && existing.maintenanceUntil > now;
+
     if (deltaSeconds > 0 && deltaSeconds < (OFFLINE_THRESHOLD * 2 / 1000)) {
+        // Normal check-in
+        uptimeStats.buckets[today] += deltaSeconds;
+    } else if (inMaintenance && deltaSeconds > 0) {
+        // If in maintenance and offline, we "Excused" the downtime by counting it as active
+        // This ensures health status stays at 100% during scheduled windows
         uptimeStats.buckets[today] += deltaSeconds;
     }
+    
     return uptimeStats;
 }
 
@@ -170,7 +181,6 @@ const server = http.createServer(async (req, res) => {
                 const data = JSON.parse(body);
                 settings = { ...settings, ...data };
                 if (currentUser) await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config'), settings);
-                // Allow UI Hot-Swap pushing from settings
                 if (data.newCloudUI) {
                     await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'assets', 'ui_template'), { html: data.newCloudUI, ts: Date.now() });
                     cloudUITemplate = data.newCloudUI;
@@ -205,6 +215,7 @@ const server = http.createServer(async (req, res) => {
             if (node) {
                 const until = durationHours > 0 ? Date.now() + (durationHours * 3600000) : 0;
                 node.maintenanceUntil = until;
+                nodes.set(nodeId, node);
                 if (currentUser) updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'nodes', nodeId), { maintenanceUntil: until });
                 await logAction(adminEmail, until > 0 ? `Set Maintenance (${durationHours}h)` : "Cleared Maintenance", node.location || nodeId);
             }
@@ -246,6 +257,7 @@ function generateLocalUI(cfg) {
             .topology-line { stroke: #333333; stroke-width: 1; stroke-dasharray: 4; }
             .topology-node { fill: #262626; stroke: #f97316; stroke-width: 2; }
             .topology-center { fill: #f97316; }
+            .maint-row { background: #2d241a; border: 1px solid #b45309; }
         </style>
     </head>
     <body class="min-h-screen flex flex-col antialiased">
@@ -272,10 +284,13 @@ function generateLocalUI(cfg) {
                 <img id="headerLogo" src="" class="w-6 h-6 object-contain" alt="">
                 <h1 id="headerTitle" class="text-sm font-black text-white uppercase"></h1>
             </div>
-            <button onclick="toggleView('dashboard')" class="text-neutral-500 hover:text-[#f97316] transition-colors p-2"><i class="fas fa-home text-sm"></i></button>
+            <div class="flex items-center gap-2">
+                <button onclick="toggleView('dashboard')" class="text-neutral-500 hover:text-[#f97316] transition-colors p-2"><i class="fas fa-home text-sm"></i></button>
+                <button onclick="toggleView('agenda')" class="text-neutral-500 hover:text-[#f97316] transition-colors p-2"><i class="fas fa-calendar-alt text-sm"></i></button>
+            </div>
             <div class="flex-1 max-w-xl relative">
                 <i class="fas fa-search absolute left-4 top-1/2 -translate-y-1/2 text-neutral-600 text-[10px]"></i>
-                <input type="text" id="globalFilter" placeholder="Filter fleet..." class="w-full bg-neutral-900/50 border border-neutral-800 rounded-full pl-10 pr-4 py-1.5 text-xs text-neutral-300 focus:ring-0">
+                <input type="text" id="globalFilter" placeholder="Search operational fleet..." class="w-full bg-neutral-900/50 border border-neutral-800 rounded-full pl-10 pr-4 py-1.5 text-xs text-neutral-300 focus:ring-0">
             </div>
             <div class="flex items-center gap-4 ml-auto">
                 <button onclick="toggleView('config')" class="text-neutral-500 hover:text-[#f97316] transition-colors"><i class="fas fa-cog text-sm"></i></button>
@@ -289,9 +304,19 @@ function generateLocalUI(cfg) {
             <div id="dashboardView" class="view-section">
                 <div class="flex flex-col gap-2" id="nodeList"></div>
             </div>
+
+            <div id="agendaView" class="view-section hidden">
+                <div class="mb-10 text-left">
+                    <h2 class="text-3xl font-black text-white uppercase tracking-tighter mb-1">Maintenance Agenda</h2>
+                    <p class="text-neutral-500 text-[10px] font-bold uppercase tracking-widest">Silenced Nodes & Active Maintenance Windows</p>
+                </div>
+                <div class="flex flex-col gap-2" id="agendaList"></div>
+            </div>
+
             <div id="explorerView" class="view-section hidden">
                 <div id="explorerContent"></div>
             </div>
+
             <div id="configView" class="view-section hidden text-left">
                 <button onclick="toggleView('dashboard')" class="mb-6 text-neutral-500 hover:text-[#f97316] font-bold text-[10px] uppercase tracking-widest"><i class="fas fa-arrow-left mr-2"></i> Dashboard</button>
                 <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
@@ -411,17 +436,28 @@ function generateLocalUI(cfg) {
             }
 
             function render() {
+                const activeView = Array.from(document.querySelectorAll('.view-section')).find(s => !s.classList.contains('hidden'))?.id;
+                
+                if (activeView === 'agendaView') {
+                    renderAgenda();
+                } else if (activeNodeId) {
+                    renderExplorer();
+                } else {
+                    renderList();
+                }
+            }
+
+            function renderList() {
                 const list = document.getElementById('nodeList');
                 if (!list) return;
                 const filter = (document.getElementById('globalFilter')?.value || "").toLowerCase();
-                if (activeNodeId) { renderExplorer(); return; }
                 
                 const nodesToRender = currentData.filter(n => ((n.hostname || "").toLowerCase().includes(filter) || (n.location || "").toLowerCase().includes(filter)))
                     .sort((a, b) => (b.isOnline ? 1 : 0) - (a.isOnline ? 1 : 0));
 
                 if (nodesToRender.length === 0) {
                     list.innerHTML = \`<div class="p-12 text-center bg-[#262626] rounded-2xl border border-dashed border-neutral-700">
-                        <p class="text-[10px] font-black uppercase text-neutral-500 tracking-widest">Waiting for incoming nodes...</p>
+                        <p class="text-[10px] font-black uppercase text-neutral-500 tracking-widest">Fleet Monitoring Idle...</p>
                     </div>\`;
                     return;
                 }
@@ -429,26 +465,62 @@ function generateLocalUI(cfg) {
                 list.innerHTML = nodesToRender.map(n => {
                     const isMaint = n.maintenanceUntil && n.maintenanceUntil > Date.now();
                     const u7 = getUptime(n.uptimeStats, 7);
+                    const rowClass = isMaint ? 'maint-row' : 'node-row';
+                    
                     return \`
-                    <div class="node-row rounded-xl p-4 flex items-center gap-6 text-left relative">
-                        <div class="w-1.5 h-1.5 rounded-full \${n.isOnline ? 'bg-emerald-500 shadow-[0_0_8px_#10b981]' : 'bg-red-500'}"></div>
+                    <div class="\${rowClass} rounded-xl p-4 flex items-center gap-6 text-left relative transition-all duration-300">
+                        <div class="w-1.5 h-1.5 rounded-full \${isMaint ? 'bg-amber-500 shadow-[0_0_8px_#f59e0b]' : (n.isOnline ? 'bg-emerald-500 shadow-[0_0_8px_#10b981]' : 'bg-red-500')}"></div>
                         <div class="flex-1 min-w-0">
-                            <h3 class="text-sm font-black text-white uppercase">\${n.location || n.hostname} \${isMaint ? '<span class="ml-2 text-[8px] text-amber-500">[MAINT]</span>' : ''}</h3>
+                            <h3 class="text-sm font-black text-white uppercase">\${n.location || n.hostname} \${isMaint ? '<span class="ml-2 text-[8px] text-amber-500">[MAINTENANCE ACTIVE]</span>' : ''}</h3>
                             <p class="text-[8px] text-neutral-500 uppercase font-mono">\${n.hostname} // \${n.ip}</p>
                         </div>
                         <div class="flex items-center gap-6">
                             \${generateSparkline(n.metricsHistory, 'cpu')}
                             <div class="text-center min-w-[40px]">
-                                <p class="text-[7px] text-neutral-600 uppercase">Health</p>
+                                <p class="text-[7px] text-neutral-600 uppercase">Health Score</p>
                                 <p class="text-[9px] font-black accent-orange">\${u7}%</p>
                             </div>
                         </div>
                         <div class="flex gap-2">
-                            <button onclick="window.setMaintenance('\${n.id}', \${isMaint ? 0 : 2})" class="p-2 bg-neutral-900 border border-[#333333] rounded-lg text-neutral-600 hover:text-amber-500 transition-colors">
+                            <button onclick="window.setMaintenance('\${n.id}', \${isMaint ? 0 : 2})" class="p-2 bg-neutral-900 border border-[#444444] rounded-lg text-neutral-600 hover:text-amber-500 transition-colors">
                                 <i class="fas \${isMaint ? 'fa-bell' : 'fa-bell-slash'} text-[10px]"></i>
                             </button>
-                            <button onclick="window.launchExplorer('\${n.id}')" class="px-4 py-2 bg-neutral-900 border border-neutral-800 rounded-lg text-[8px] font-black uppercase hover:border-orange transition-colors">Explore</button>
+                            <button onclick="window.launchExplorer('\${n.id}')" class="px-4 py-2 bg-neutral-900 border border-neutral-800 rounded-lg text-[8px] font-black uppercase hover:border-orange transition-colors">Explorer</button>
                         </div>
+                    </div>\`;
+                }).join("");
+            }
+
+            function renderAgenda() {
+                const list = document.getElementById('agendaList');
+                if (!list) return;
+                const now = Date.now();
+                const maintNodes = currentData.filter(n => n.maintenanceUntil && n.maintenanceUntil > now);
+
+                if (maintNodes.length === 0) {
+                    list.innerHTML = \`<div class="p-20 text-center bg-[#262626] rounded-3xl border border-dashed border-neutral-800">
+                        <i class="fas fa-calendar-check text-neutral-700 text-4xl mb-4"></i>
+                        <p class="text-[10px] font-black uppercase text-neutral-500 tracking-widest">All Nodes Operational. No Active Maintenance Windows.</p>
+                    </div>\`;
+                    return;
+                }
+
+                list.innerHTML = maintNodes.map(n => {
+                    const timeLeft = Math.max(0, Math.ceil((n.maintenanceUntil - now) / 60000));
+                    return \`
+                    <div class="maint-row rounded-2xl p-6 flex items-center gap-8 text-left transition-all">
+                        <div class="w-12 h-12 rounded-full bg-amber-500/10 flex items-center justify-center text-amber-500">
+                            <i class="fas fa-clock text-xl animate-pulse"></i>
+                        </div>
+                        <div class="flex-1">
+                            <h3 class="text-lg font-black text-white uppercase tracking-tighter">\${n.location || n.hostname}</h3>
+                            <p class="text-[10px] text-amber-500/80 font-bold uppercase tracking-widest">Silenced // Maintenance Window Active</p>
+                        </div>
+                        <div class="text-right">
+                            <p class="text-[8px] text-neutral-500 uppercase font-black mb-1">Estimated Completion</p>
+                            <p class="text-xl font-black text-white">\${timeLeft} <span class="text-[10px] text-neutral-500 uppercase">Minutes</span></p>
+                        </div>
+                        <button onclick="window.setMaintenance('\${n.id}', 0)" class="px-6 py-3 bg-amber-600 hover:bg-amber-500 text-black rounded-xl font-black uppercase text-[10px] transition-all">Resume Monitoring</button>
                     </div>\`;
                 }).join("");
             }
@@ -456,7 +528,8 @@ function generateLocalUI(cfg) {
             window.toggleView = (view) => {
                 document.querySelectorAll('.view-section').forEach(s => s.classList.add('hidden'));
                 document.getElementById(view + 'View').classList.remove('hidden');
-                activeNodeId = (view === 'dashboard') ? null : activeNodeId;
+                activeNodeId = (view === 'dashboard' || view === 'agenda') ? null : activeNodeId;
+                render();
             };
 
             window.launchExplorer = (id) => { activeNodeId = id; toggleView('explorer'); render(); };
@@ -480,46 +553,60 @@ function generateLocalUI(cfg) {
                 const grid = document.getElementById('explorerContent');
                 if(!n || !grid) return;
                 const latest = n.metricsHistory?.[n.metricsHistory.length - 1] || { cpu: 0, ram: 0, disk: 0 };
+                const isMaint = n.maintenanceUntil && n.maintenanceUntil > Date.now();
 
                 grid.innerHTML = \`
-                    <button onclick="window.toggleView('dashboard')" class="mb-6 text-neutral-500 hover:text-[#f97316] font-bold text-[10px] uppercase tracking-widest transition-colors"><i class="fas fa-arrow-left mr-2"></i> Dashboard</button>
+                    <div class="flex items-center justify-between mb-8">
+                        <button onclick="window.toggleView('dashboard')" class="text-neutral-500 hover:text-[#f97316] font-bold text-[10px] uppercase tracking-widest transition-colors"><i class="fas fa-arrow-left mr-2"></i> Operational Dashboard</button>
+                        \${isMaint ? '<span class="bg-amber-600 text-black px-4 py-1.5 rounded-full text-[9px] font-black uppercase">Alerts Silenced</span>' : ''}
+                    </div>
+                    
                     <div class="mb-10 text-left">
                         <h2 class="text-3xl font-black text-white uppercase tracking-tighter mb-1">\${n.location || n.hostname}</h2>
-                        <p class="text-neutral-500 text-[10px] font-bold uppercase tracking-widest">\${n.hostname} // Intelligent Telemetry</p>
+                        <p class="text-neutral-500 text-[10px] font-bold uppercase tracking-widest">\${n.hostname} // Intelligent Asset Discovery</p>
                     </div>
 
                     \${renderTopology(n.scannedDevices)}
 
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
                         <div class="card-metric rounded-3xl p-8 shadow-2xl relative overflow-hidden">
-                            <span class="text-[10px] font-black text-neutral-500 uppercase tracking-widest">CPU</span>
+                            <span class="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Compute Core</span>
                             <div class="text-3xl font-black mt-2" style="color: \${getStatusColor(latest.cpu)}">\${latest.cpu}%</div>
                             <div class="mt-4">\${generateSparkline(n.metricsHistory, 'cpu', 300, 60, 'sparkline-lg')}</div>
                         </div>
                         <div class="card-metric rounded-3xl p-8 shadow-2xl relative overflow-hidden">
-                            <span class="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Memory</span>
+                            <span class="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Memory Allocation</span>
                             <div class="text-3xl font-black mt-2" style="color: \${getStatusColor(latest.ram)}">\${latest.ram}%</div>
                             <div class="mt-4">\${generateSparkline(n.metricsHistory, 'ram', 300, 60, 'sparkline-lg')}</div>
                         </div>
                         <div class="card-metric rounded-3xl p-8 shadow-2xl relative overflow-hidden">
-                            <span class="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Disk Usage</span>
+                            <span class="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Storage Footprint</span>
                             <div class="text-3xl font-black mt-2" style="color: \${getStatusColor(latest.disk)}">\${latest.disk}%</div>
-                            <p class="text-[8px] text-neutral-500 mt-2">\${n.disk || ''}</p>
+                            <p class="text-[8px] text-neutral-500 mt-2 font-mono uppercase font-bold">\${n.disk || 'Scanning...'}</p>
                         </div>
                     </div>
 
                     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                         \${(n.scannedDevices || []).map(c => {
                             let risk = '';
-                            Object.keys(RISKY_PORTS).forEach(p => { if(c.description?.includes(p)) risk = \`<div class="risk-badge mb-2">Risk: \${RISKY_PORTS[p]}</div>\`; });
-                            return \`<div class="bg-black border border-[#444444] p-4 rounded-xl hover:border-orange">
+                            Object.keys(RISKY_PORTS).forEach(p => { if(c.description?.includes(p)) risk = \`<div class="risk-badge mb-2">Security Risk: \${RISKY_PORTS[p]}</div>\`; });
+                            return \`<div class="bg-black border border-[#444444] p-4 rounded-xl hover:border-orange transition-all">
                                 \${risk}
                                 <span class="text-[9px] font-mono text-neutral-500">\${c.ip}</span>
-                                <h4 class="text-xs font-black text-white uppercase truncate mt-1">\${c.name || 'Device'}</h4>
+                                <h4 class="text-xs font-black text-white uppercase truncate mt-1">\${c.name || 'Discovered Asset'}</h4>
                             </div>\`;
                         }).join('')}
                     </div>\`;
             }
+
+            window.setMaintenance = async (id, hours) => {
+                const adminEmail = document.getElementById('adminEmailDisplay').innerText;
+                await fetch('/api/set-maintenance', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ nodeId: id, durationHours: hours, adminEmail }) });
+                const r = await fetch('/api/status');
+                const j = await r.json();
+                currentData = j.nodes;
+                render();
+            };
 
             function updateBranding() {
                 document.getElementById('headerTitle').innerText = currentSettings.siteTitle || "HUB";
