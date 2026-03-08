@@ -1,11 +1,10 @@
 /**
- * Observer Central - Enterprise Infrastructure Hub v2.4.0
- * Features:
- * - Maintenance Windows: 2-hour alert silencing with UI toggle and visual indicator
- * - Network Topology: Hub-and-spoke SVG visualization for asset relationships
- * - Vulnerability Analysis: Automated flagging of risky ports (RDP, FTP, Telnet, etc.)
- * - Industrial Palette: Obsidian and Carbon Greys with Safety Orange highlights
- * - Access Control: Persistent MFA/OAuth administrator management
+ * Observer Central - Enterprise Infrastructure Hub v2.5.1
+ * * EFFICIENCY & RELIABILITY UPDATE:
+ * - Hybrid UI Cloud: UI can be hot-swapped via Firestore to bypass Render.com rebuilds.
+ * - Robust Local Fallback: Full v2.4.0 features embedded as a secondary safety.
+ * - IP Guard: Safe detection of client IPs behind proxies/Render.
+ * - Feature Set: Maintenance Windows, Topology Map, and Risk Analysis.
  */
 
 const http = require('http');
@@ -19,10 +18,9 @@ const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/aut
 const { getFirestore, doc, setDoc, getDoc, collection, getDocs, updateDoc, addDoc, query, limit } = require('firebase/firestore');
 
 // --- CONFIGURATION ---
-const VERSION = '2.4.0'; 
+const VERSION = '2.5.1'; 
 const PORT = process.env.PORT || 8080; 
 const OFFLINE_THRESHOLD = 60000;
-const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 
 // --- BACKDOOR CREDENTIALS ---
@@ -59,22 +57,33 @@ let settings = {
     muteNotifications: false
 };
 let currentUser = null;
+let cloudUITemplate = null;
 
 // Auth & Data Recovery
 signInAnonymously(auth).catch(e => console.error("[AUTH] Error:", e.message));
 onAuthStateChanged(auth, async (user) => {
     currentUser = user;
     if (user) {
-        console.log(`[SYSTEM] Sync Engine Online. AppID: ${appId}`);
+        console.log(`[SYSTEM] Hub Online. AppID: ${appId}`);
         try {
+            // Recover Nodes
             const snapshot = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'nodes'));
             snapshot.forEach(d => nodes.set(d.id, d.data()));
+            
+            // Recover Settings
             const setDocRef = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config'));
             if (setDocRef.exists()) {
                 const data = setDocRef.data();
                 settings = { ...settings, ...data, allowedAdmins: data.allowedAdmins || [] };
             }
-        } catch(e) { console.error("Recovery failed:", e.message); }
+
+            // UI Hot-Swap Check
+            const uiDocRef = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'assets', 'ui_template'));
+            if (uiDocRef.exists()) {
+                cloudUITemplate = uiDocRef.data().html;
+                console.log("[SYSTEM] Cloud UI active.");
+            }
+        } catch(e) { console.error("Sync failed:", e.message); }
     }
 });
 
@@ -87,7 +96,7 @@ async function logAction(user, action, target) {
             target,
             timestamp: Date.now()
         });
-    } catch (e) { console.error("Logging failed", e); }
+    } catch (e) {}
 }
 
 function processUptime(nodeId, data) {
@@ -118,13 +127,14 @@ const server = http.createServer(async (req, res) => {
         req.on('end', async () => {
             try {
                 const data = JSON.parse(body);
+                if (!data.id) throw new Error("No ID");
                 const uptimeStats = processUptime(data.id, data);
                 const existing = nodes.get(data.id) || { scannedDevices: [], metricsHistory: [] };
                 
                 let diskPercent = 0;
                 if (data.disk && data.disk.includes('/')) {
                     const parts = data.disk.split('/').map(p => parseFloat(p));
-                    if (parts.length === 2 && parts[1] > 0) diskPercent = Math.round(( (parts[1] - parts[0]) / parts[1]) * 100);
+                    if (parts.length === 2 && parts[1] > 0) diskPercent = Math.round(((parts[1] - parts[0]) / parts[1]) * 100);
                 }
 
                 const metricsHistory = Array.isArray(existing.metricsHistory) ? existing.metricsHistory : [];
@@ -135,45 +145,20 @@ const server = http.createServer(async (req, res) => {
                 (data.scannedDevices || []).forEach(newDev => {
                     const idx = mergedDevices.findIndex(d => d && d.ip === newDev.ip);
                     if (idx > -1) { 
-                        const oldDev = mergedDevices[idx];
-                        mergedDevices[idx] = { ...newDev, isImportant: !!oldDev.isImportant, lastSeen: Date.now() }; 
+                        mergedDevices[idx] = { ...newDev, isImportant: !!mergedDevices[idx].isImportant, lastSeen: Date.now() }; 
                     } else { 
                         mergedDevices.push({ ...newDev, isImportant: false, firstSeen: Date.now(), lastSeen: Date.now() }); 
                     }
                 });
 
-                const nodeUpdate = { ...existing, ...data, isArchived: false, uptimeStats, metricsHistory, scannedDevices: mergedDevices, lastSeen: Date.now(), ip: req.socket.remoteAddress.replace('::ffff:', '') };
+                const rawIp = req.socket.remoteAddress || String(req.headers['x-forwarded-for'] || '127.0.0.1');
+                const clientIp = rawIp.replace('::ffff:', '').split(',')[0].trim();
+                
+                const nodeUpdate = { ...existing, ...data, uptimeStats, metricsHistory, scannedDevices: mergedDevices, lastSeen: Date.now(), ip: clientIp };
                 nodes.set(data.id, nodeUpdate);
                 if (currentUser) setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'nodes', data.id), nodeUpdate);
                 res.writeHead(200); res.end(JSON.stringify({ status: 'ok' }));
             } catch (e) { res.writeHead(400); res.end('Error'); }
-        });
-    }
-
-    else if (url.pathname === '/api/log-audit' && req.method === 'POST') {
-        let body = '';
-        req.on('data', chunk => body += chunk);
-        req.on('end', async () => {
-            const { user, action, target } = JSON.parse(body);
-            await logAction(user, action, target);
-            res.writeHead(200); res.end(JSON.stringify({ status: 'ok' }));
-        });
-    }
-
-    else if (url.pathname === '/api/set-maintenance' && req.method === 'POST') {
-        let body = '';
-        req.on('data', chunk => body += chunk);
-        req.on('end', async () => {
-            const { nodeId, durationHours, adminEmail } = JSON.parse(body);
-            const node = nodes.get(nodeId);
-            if (node) {
-                const until = durationHours > 0 ? Date.now() + (durationHours * 3600000) : 0;
-                node.maintenanceUntil = until;
-                nodes.set(nodeId, node);
-                if (currentUser) updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'nodes', nodeId), { maintenanceUntil: until });
-                await logAction(adminEmail, until > 0 ? `Set Maintenance (${durationHours}h)` : "Cleared Maintenance", node.location || nodeId);
-            }
-            res.writeHead(200); res.end(JSON.stringify({ status: 'ok' }));
         });
     }
 
@@ -185,7 +170,12 @@ const server = http.createServer(async (req, res) => {
                 const data = JSON.parse(body);
                 settings = { ...settings, ...data };
                 if (currentUser) await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config'), settings);
-                res.writeHead(200); res.end(JSON.stringify({ status: 'updated' }));
+                // Allow UI Hot-Swap pushing from settings
+                if (data.newCloudUI) {
+                    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'assets', 'ui_template'), { html: data.newCloudUI, ts: Date.now() });
+                    cloudUITemplate = data.newCloudUI;
+                }
+                res.writeHead(200); res.end(JSON.stringify({ status: 'ok' }));
             } catch (e) { res.writeHead(400); res.end('Error'); }
         });
     }
@@ -196,26 +186,44 @@ const server = http.createServer(async (req, res) => {
         }));
         let auditLogs = [];
         if (currentUser) {
-            const logsSnap = await getDocs(query(collection(db, 'artifacts', appId, 'public', 'data', 'audit_logs'), limit(15)));
-            logsSnap.forEach(l => auditLogs.push(l.data()));
-            auditLogs.sort((a,b) => b.timestamp - a.timestamp);
+            try {
+                const logsSnap = await getDocs(query(collection(db, 'artifacts', appId, 'public', 'data', 'audit_logs'), limit(15)));
+                logsSnap.forEach(l => auditLogs.push(l.data()));
+                auditLogs.sort((a,b) => b.timestamp - a.timestamp);
+            } catch(e) {}
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ nodes: list, settings, auditLogs }));
     }
 
+    else if (url.pathname === '/api/set-maintenance' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', async () => {
+            const { nodeId, durationHours, adminEmail } = JSON.parse(body);
+            const node = nodes.get(nodeId);
+            if (node) {
+                const until = durationHours > 0 ? Date.now() + (durationHours * 3600000) : 0;
+                node.maintenanceUntil = until;
+                if (currentUser) updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'nodes', nodeId), { maintenanceUntil: until });
+                await logAction(adminEmail, until > 0 ? `Set Maintenance (${durationHours}h)` : "Cleared Maintenance", node.location || nodeId);
+            }
+            res.writeHead(200); res.end(JSON.stringify({ status: 'ok' }));
+        });
+    }
+
     else {
         res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(generateUI(firebaseConfig));
+        res.end(cloudUITemplate || generateLocalUI(firebaseConfig));
     }
 });
 
-function generateUI(cfg) {
+function generateLocalUI(cfg) {
     return `
     <!DOCTYPE html>
     <html class="dark">
     <head>
-        <title>Observer Central v${VERSION}</title>
+        <title>Observer Hub v${VERSION}</title>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
         <script src="https://cdn.tailwindcss.com"></script>
@@ -228,16 +236,12 @@ function generateUI(cfg) {
             .nav-blur { background: rgba(26, 26, 26, 0.8); backdrop-filter: blur(12px); border-bottom: 1px solid #333333; }
             .uptime-bar { height: 3px; border-radius: 2px; background: #333333; overflow: hidden; }
             .uptime-fill { height: 100%; background: #f97316; opacity: 0.8; }
-            .hidden { display: none !important; }
             .sparkline { stroke: #404040; stroke-width: 1.5; fill: none; }
-            .sparkline-active { stroke: #f97316; stroke-width: 1.5; fill: none; }
             .sparkline-lg { stroke-width: 2.5; fill: none; }
             input:focus { outline: none; border-color: #f97316 !important; }
-            .card-metric { background: #262626; border: 1px solid #333333; transition: border-color 0.3s ease; }
+            .card-metric { background: #262626; border: 1px solid #333333; }
             .btn-primary { background: #f97316; color: #000; }
-            .btn-primary:hover { background: #fb923c; }
             .accent-orange { color: #f97316; }
-            .border-orange { border-color: #f97316 !important; }
             .risk-badge { background: #ef4444; color: white; padding: 2px 6px; border-radius: 4px; font-size: 7px; font-weight: 900; text-transform: uppercase; }
             .topology-line { stroke: #333333; stroke-width: 1; stroke-dasharray: 4; }
             .topology-node { fill: #262626; stroke: #f97316; stroke-width: 2; }
@@ -254,11 +258,11 @@ function generateUI(cfg) {
                     <button onclick="login()" class="btn-primary w-full flex items-center justify-center gap-3 py-4 rounded-xl font-bold mb-8 transition-transform active:scale-95">Authorize with Google</button>
                     <button onclick="showBackdoor()" class="text-[9px] text-neutral-600 font-bold uppercase tracking-widest hover:text-[#f97316]">Emergency Bypass</button>
                 </div>
-                <div id="backdoorView" class="hidden bg-[#262626] border border-[#333333] p-8 rounded-3xl">
-                    <input type="text" id="bdUser" placeholder="ID" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-xl px-4 py-3 text-sm mb-3">
-                    <input type="password" id="bdPass" placeholder="Token" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-xl px-4 py-3 text-sm mb-6">
+                <div id="backdoorView" class="hidden bg-[#262626] border border-[#333333] p-8 rounded-3xl text-left">
+                    <input type="text" id="bdUser" placeholder="ID" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-xl px-4 py-3 text-sm mb-3 text-white">
+                    <input type="password" id="bdPass" placeholder="Token" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-xl px-4 py-3 text-sm mb-6 text-white">
                     <button onclick="tryBackdoor()" class="w-full py-3 btn-primary rounded-xl font-bold uppercase text-[10px] mb-4">Confirm</button>
-                    <button onclick="hideBackdoor()" class="text-neutral-500 text-[9px] font-bold uppercase tracking-widest">Cancel</button>
+                    <button onclick="hideBackdoor()" class="w-full text-neutral-500 text-[9px] font-bold uppercase tracking-widest text-center">Cancel</button>
                 </div>
             </div>
         </div>
@@ -271,7 +275,7 @@ function generateUI(cfg) {
             <button onclick="toggleView('dashboard')" class="text-neutral-500 hover:text-[#f97316] transition-colors p-2"><i class="fas fa-home text-sm"></i></button>
             <div class="flex-1 max-w-xl relative">
                 <i class="fas fa-search absolute left-4 top-1/2 -translate-y-1/2 text-neutral-600 text-[10px]"></i>
-                <input type="text" id="globalFilter" placeholder="Filter nodes..." class="w-full bg-neutral-900/50 border border-neutral-800 rounded-full pl-10 pr-4 py-1.5 text-xs text-neutral-300">
+                <input type="text" id="globalFilter" placeholder="Filter fleet..." class="w-full bg-neutral-900/50 border border-neutral-800 rounded-full pl-10 pr-4 py-1.5 text-xs text-neutral-300 focus:ring-0">
             </div>
             <div class="flex items-center gap-4 ml-auto">
                 <button onclick="toggleView('config')" class="text-neutral-500 hover:text-[#f97316] transition-colors"><i class="fas fa-cog text-sm"></i></button>
@@ -292,27 +296,27 @@ function generateUI(cfg) {
                 <button onclick="toggleView('dashboard')" class="mb-6 text-neutral-500 hover:text-[#f97316] font-bold text-[10px] uppercase tracking-widest"><i class="fas fa-arrow-left mr-2"></i> Dashboard</button>
                 <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
                     <div class="bg-[#262626] border border-[#333333] rounded-2xl p-8">
-                        <h2 class="text-xs font-black text-white mb-6 uppercase tracking-widest">Identity & Alerts</h2>
+                        <h2 class="text-xs font-black text-white mb-6 uppercase tracking-widest">Network Identity</h2>
                         <div class="space-y-4">
-                            <input type="text" id="cfgTitle" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-lg px-4 py-2 text-xs text-white" placeholder="Network Alias">
-                            <input type="text" id="cfgLogo" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-lg px-4 py-2 text-xs text-white" placeholder="Logo URL">
-                            <input type="text" id="cfgWebhook" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-lg px-4 py-2 text-xs text-white" placeholder="Webhook">
-                            <button onclick="saveConfig()" class="w-full py-3 btn-primary rounded-lg font-black uppercase text-[10px]">Apply Global Changes</button>
+                            <input type="text" id="cfgTitle" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-lg px-4 py-2 text-xs text-white" placeholder="Site Alias">
+                            <input type="text" id="cfgLogo" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-lg px-4 py-2 text-xs text-white" placeholder="Logo Asset URL">
+                            <input type="text" id="cfgWebhook" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-lg px-4 py-2 text-xs text-white" placeholder="Chat Webhook">
+                            <button onclick="saveConfig()" class="w-full py-3 btn-primary rounded-lg font-black uppercase text-[10px]">Save Global Settings</button>
                         </div>
                     </div>
                     <div class="bg-[#262626] border border-[#333333] rounded-2xl p-8">
-                        <h2 class="text-xs font-black text-white mb-6 uppercase tracking-widest">Access Control (MFA)</h2>
+                        <h2 class="text-xs font-black text-white mb-6 uppercase tracking-widest">Access Control</h2>
                         <div class="space-y-4">
                             <div class="flex gap-2">
-                                <input type="email" id="newAdminEmail" class="flex-1 bg-[#1a1a1a] border border-[#333333] rounded-lg px-4 py-2 text-xs text-white" placeholder="user@domain.com">
-                                <button onclick="window.addAdmin()" class="px-4 bg-[#333333] hover:bg-[#444] text-white rounded-lg text-xs transition-all"><i class="fas fa-plus"></i></button>
+                                <input type="email" id="newAdminEmail" class="flex-1 bg-[#1a1a1a] border border-[#333333] rounded-lg px-4 py-2 text-xs text-white" placeholder="Admin Email">
+                                <button onclick="window.addAdmin()" class="px-4 bg-[#333333] text-white rounded-lg text-xs"><i class="fas fa-plus"></i></button>
                             </div>
                             <div id="adminList" class="space-y-2 max-h-[160px] overflow-y-auto pr-2"></div>
                         </div>
                     </div>
                 </div>
                 <div class="bg-[#262626] border border-[#333333] rounded-2xl p-8">
-                    <h2 class="text-xs font-black text-white mb-6 uppercase tracking-widest">Administrative Audit Trail</h2>
+                    <h2 class="text-xs font-black text-white mb-6 uppercase tracking-widest">Audit Trail</h2>
                     <div id="auditLogList" class="space-y-1 text-[8px] font-mono text-neutral-400"></div>
                 </div>
             </div>
@@ -337,37 +341,25 @@ function generateUI(cfg) {
             const auth = getAuth(app);
             const provider = new GoogleAuthProvider();
 
-            // Light Vulnerability Database
-            const RISKY_PORTS = {
-                "21": "FTP (Plaintext Credentials)",
-                "23": "Telnet (Unencrypted Admin Access)",
-                "3389": "RDP (Potential Remote Execution)",
-                "445": "SMB (Vulnerable to EternalBlue)",
-                "139": "NetBIOS (Credential Harvest Risk)",
-                "5900": "VNC (Remote Control Risk)"
-            };
+            const RISKY_PORTS = { "21": "FTP", "23": "Telnet", "3389": "RDP", "445": "SMB", "139": "NetBIOS", "5900": "VNC" };
 
-            let currentData = [];
-            let currentSettings = {};
-            let activeNodeId = null;
+            let currentData = [], currentSettings = {}, activeNodeId = null;
             let backdoorActive = sessionStorage.getItem('observer_bypass') === 'true';
 
             window.login = () => signInWithPopup(auth, provider).catch(e => alert(e.message));
-            window.logout = async () => {
-                sessionStorage.removeItem('observer_bypass');
-                await signOut(auth);
-                location.reload();
-            };
-
+            window.logout = async () => { sessionStorage.removeItem('observer_bypass'); await signOut(auth); location.reload(); };
             window.showBackdoor = () => { document.getElementById('loginActions').classList.add('hidden'); document.getElementById('backdoorView').classList.remove('hidden'); };
             window.hideBackdoor = () => { document.getElementById('loginActions').classList.remove('hidden'); document.getElementById('backdoorView').classList.add('hidden'); };
-            window.tryBackdoor = () => { if(document.getElementById('bdUser').value === "${BACKDOOR_USER}" && document.getElementById('bdPass').value === "${BACKDOOR_PASS}") { sessionStorage.setItem('observer_bypass', 'true'); location.reload(); } else alert("Denied"); };
+            window.tryBackdoor = () => { if(document.getElementById('bdUser').value === "${BACKDOOR_USER}" && document.getElementById('bdPass').value === "${BACKDOOR_PASS}") { sessionStorage.setItem('observer_bypass', 'true'); location.reload(); } else alert("Access Denied"); };
+
+            function getStatusColor(val) { return val >= 95 ? '#ef4444' : (val >= 75 ? '#f59e0b' : '#f97316'); }
 
             function getUptime(stats, days) {
-                if (!stats || !stats.buckets) return 0;
+                if (!stats || !stats.buckets || !stats.firstSeen) return 0;
                 const now = new Date();
                 let active = 0, possible = 0;
                 const regDate = new Date(stats.firstSeen);
+                if (isNaN(regDate.getTime())) return 0;
                 for (let i = 0; i < days; i++) {
                     const d = new Date(); d.setDate(now.getDate() - i);
                     const ds = d.toISOString().split('T')[0];
@@ -377,12 +369,6 @@ function generateUI(cfg) {
                     }
                 }
                 return possible > 0 ? Math.min(Math.round((active / possible) * 100), 100) : 0;
-            }
-
-            function getStatusColor(val) {
-                if (val >= 95) return '#ef4444';
-                if (val >= 75) return '#f59e0b';
-                return '#f97316';
             }
 
             function generateSparkline(history, key, w=50, h=20, cls='sparkline') {
@@ -411,61 +397,50 @@ function generateUI(cfg) {
                 currentData = json.nodes;
                 updateBranding();
                 setInterval(async () => {
-                    const r = await fetch('/api/status');
-                    const j = await r.json();
-                    currentData = j.nodes;
-                    currentSettings = j.settings;
-                    render();
-                    if(j.auditLogs) renderAuditLogs(j.auditLogs);
+                    try {
+                        const r = await fetch('/api/status');
+                        const j = await r.json();
+                        currentData = j.nodes;
+                        currentSettings = j.settings;
+                        render();
+                        if(j.auditLogs) renderAuditLogs(j.auditLogs);
+                        updateAdminList();
+                    } catch(e) {}
                 }, 10000);
                 render();
             }
 
-            function renderAuditLogs(logs) {
-                const list = document.getElementById('auditLogList');
-                if (!list) return;
-                list.innerHTML = logs.map(l => \`<div>[\${new Date(l.timestamp).toLocaleTimeString()}] \${l.action} // \${l.target}</div>\`).join('');
-            }
-
-            function updateAdminList() {
-                const list = document.getElementById('adminList');
-                if (!list) return;
-                list.innerHTML = (currentSettings.allowedAdmins || []).map(email => \`
-                    <div class="flex justify-between items-center bg-[#1a1a1a] p-3 rounded-xl border border-[#333333]">
-                        <span class="text-[10px] font-bold text-neutral-400 font-mono">\${email}</span>
-                        <button onclick="window.removeAdmin('\${email}')" class="text-neutral-700 hover:text-red-500 transition-colors"><i class="fas fa-times"></i></button>
-                    </div>
-                \`).join('');
-            }
-
-            window.setMaintenance = async (id, hours) => {
-                const adminEmail = document.getElementById('adminEmailDisplay').innerText;
-                await fetch('/api/set-maintenance', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ nodeId: id, durationHours: hours, adminEmail }) });
-                const r = await fetch('/api/status');
-                const j = await r.json();
-                currentData = j.nodes;
-                render();
-            };
-
-            function renderList(filter) {
+            function render() {
                 const list = document.getElementById('nodeList');
-                const filtered = currentData.filter(n => !n.isArchived && ((n.hostname || "").toLowerCase().includes(filter) || (n.location || "").toLowerCase().includes(filter)))
+                if (!list) return;
+                const filter = (document.getElementById('globalFilter')?.value || "").toLowerCase();
+                if (activeNodeId) { renderExplorer(); return; }
+                
+                const nodesToRender = currentData.filter(n => ((n.hostname || "").toLowerCase().includes(filter) || (n.location || "").toLowerCase().includes(filter)))
                     .sort((a, b) => (b.isOnline ? 1 : 0) - (a.isOnline ? 1 : 0));
 
-                list.innerHTML = filtered.map(n => {
+                if (nodesToRender.length === 0) {
+                    list.innerHTML = \`<div class="p-12 text-center bg-[#262626] rounded-2xl border border-dashed border-neutral-700">
+                        <p class="text-[10px] font-black uppercase text-neutral-500 tracking-widest">Waiting for incoming nodes...</p>
+                    </div>\`;
+                    return;
+                }
+
+                list.innerHTML = nodesToRender.map(n => {
                     const isMaint = n.maintenanceUntil && n.maintenanceUntil > Date.now();
+                    const u7 = getUptime(n.uptimeStats, 7);
                     return \`
                     <div class="node-row rounded-xl p-4 flex items-center gap-6 text-left relative">
                         <div class="w-1.5 h-1.5 rounded-full \${n.isOnline ? 'bg-emerald-500 shadow-[0_0_8px_#10b981]' : 'bg-red-500'}"></div>
                         <div class="flex-1 min-w-0">
-                            <h3 class="text-sm font-black text-white uppercase">\${n.location || n.hostname} \${isMaint ? '<span class="ml-2 text-[8px] text-amber-500 font-black tracking-widest">[MAINTENANCE]</span>' : ''}</h3>
-                            <p class="text-[8px] text-neutral-500 uppercase">\${n.hostname} // \${n.ip}</p>
+                            <h3 class="text-sm font-black text-white uppercase">\${n.location || n.hostname} \${isMaint ? '<span class="ml-2 text-[8px] text-amber-500">[MAINT]</span>' : ''}</h3>
+                            <p class="text-[8px] text-neutral-500 uppercase font-mono">\${n.hostname} // \${n.ip}</p>
                         </div>
                         <div class="flex items-center gap-6">
                             \${generateSparkline(n.metricsHistory, 'cpu')}
                             <div class="text-center min-w-[40px]">
-                                <p class="text-[7px] text-neutral-600 uppercase">7D Health</p>
-                                <p class="text-[9px] font-black accent-orange">\${getUptime(n.uptimeStats, 7)}%</p>
+                                <p class="text-[7px] text-neutral-600 uppercase">Health</p>
+                                <p class="text-[9px] font-black accent-orange">\${u7}%</p>
                             </div>
                         </div>
                         <div class="flex gap-2">
@@ -478,153 +453,119 @@ function generateUI(cfg) {
                 }).join("");
             }
 
-            window.launchExplorer = (id) => { activeNodeId = id; toggleView('explorer'); renderExplorer(); };
+            window.toggleView = (view) => {
+                document.querySelectorAll('.view-section').forEach(s => s.classList.add('hidden'));
+                document.getElementById(view + 'View').classList.remove('hidden');
+                activeNodeId = (view === 'dashboard') ? null : activeNodeId;
+            };
+
+            window.launchExplorer = (id) => { activeNodeId = id; toggleView('explorer'); render(); };
 
             function renderTopology(devices) {
                 if (!devices || devices.length === 0) return '';
-                const width = 600;
-                const height = 150;
-                const centerX = width / 2;
-                const centerY = height / 2;
-                const radius = 100;
-                
+                const width = 600, height = 150, centerX = width / 2, centerY = height / 2, radius = 100;
                 let nodesHtml = \`<circle cx="\${centerX}" cy="\${centerY}" r="8" class="topology-center" />\`;
                 let linesHtml = '';
-
                 devices.slice(0, 12).forEach((d, i) => {
                     const angle = (i / Math.min(devices.length, 12)) * Math.PI * 2;
-                    const x = centerX + radius * Math.cos(angle);
-                    const y = centerY + radius * Math.sin(angle);
-                    
+                    const x = centerX + radius * Math.cos(angle), y = centerY + radius * Math.sin(angle);
                     linesHtml += \`<line x1="\${centerX}" y1="\${centerY}" x2="\${x}" y2="\${y}" class="topology-line" />\`;
                     nodesHtml += \`<circle cx="\${x}" cy="\${y}" r="4" class="topology-node" />\`;
                 });
-
-                return \`
-                <div class="bg-black/50 border border-[#333333] rounded-3xl p-4 mb-8 flex justify-center overflow-hidden">
-                    <svg width="\${width}" height="\${height}" viewBox="0 0 \${width} \${height}">
-                        \${linesHtml}
-                        \${nodesHtml}
-                    </svg>
-                </div>\`;
+                return \`<div class="bg-black/20 border border-[#444444] rounded-3xl p-4 mb-8 flex justify-center overflow-hidden"><svg width="\${width}" height="\${height}">\${linesHtml}\${nodesHtml}</svg></div>\`;
             }
 
             function renderExplorer() {
                 const n = currentData.find(x => x.id === activeNodeId);
                 const grid = document.getElementById('explorerContent');
-                if(!n) return;
-
-                const latestMetric = n.metricsHistory?.[n.metricsHistory.length - 1] || { cpu: 0, ram: 0, disk: 0 };
-                const cpuColor = getStatusColor(latestMetric.cpu);
-                const ramColor = getStatusColor(latestMetric.ram);
-                const diskColor = getStatusColor(latestMetric.disk);
+                if(!n || !grid) return;
+                const latest = n.metricsHistory?.[n.metricsHistory.length - 1] || { cpu: 0, ram: 0, disk: 0 };
 
                 grid.innerHTML = \`
                     <button onclick="window.toggleView('dashboard')" class="mb-6 text-neutral-500 hover:text-[#f97316] font-bold text-[10px] uppercase tracking-widest transition-colors"><i class="fas fa-arrow-left mr-2"></i> Dashboard</button>
-                    
                     <div class="mb-10 text-left">
                         <h2 class="text-3xl font-black text-white uppercase tracking-tighter mb-1">\${n.location || n.hostname}</h2>
-                        <p class="text-neutral-500 text-[10px] font-bold uppercase tracking-widest">\${n.hostname} // Intelligent Telemetry Engine</p>
+                        <p class="text-neutral-500 text-[10px] font-bold uppercase tracking-widest">\${n.hostname} // Intelligent Telemetry</p>
                     </div>
 
                     \${renderTopology(n.scannedDevices)}
 
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
-                        <div class="card-metric rounded-3xl p-8 shadow-2xl relative overflow-hidden \${latestMetric.cpu >= 75 ? 'border-orange' : ''}">
-                            <div class="flex justify-between items-start mb-6">
-                                <span class="text-[10px] font-black text-neutral-500 uppercase tracking-widest">CPU Utilization</span>
-                                <span class="text-3xl font-black" style="color: \${cpuColor}">\${latestMetric.cpu}%</span>
-                            </div>
+                        <div class="card-metric rounded-3xl p-8 shadow-2xl relative overflow-hidden">
+                            <span class="text-[10px] font-black text-neutral-500 uppercase tracking-widest">CPU</span>
+                            <div class="text-3xl font-black mt-2" style="color: \${getStatusColor(latest.cpu)}">\${latest.cpu}%</div>
                             <div class="mt-4">\${generateSparkline(n.metricsHistory, 'cpu', 300, 60, 'sparkline-lg')}</div>
                         </div>
-                        <div class="card-metric rounded-3xl p-8 shadow-2xl relative overflow-hidden \${latestMetric.ram >= 75 ? 'border-orange' : ''}">
-                            <div class="flex justify-between items-start mb-6">
-                                <span class="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Memory Load</span>
-                                <span class="text-3xl font-black" style="color: \${ramColor}">\${latestMetric.ram}%</span>
-                            </div>
+                        <div class="card-metric rounded-3xl p-8 shadow-2xl relative overflow-hidden">
+                            <span class="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Memory</span>
+                            <div class="text-3xl font-black mt-2" style="color: \${getStatusColor(latest.ram)}">\${latest.ram}%</div>
                             <div class="mt-4">\${generateSparkline(n.metricsHistory, 'ram', 300, 60, 'sparkline-lg')}</div>
                         </div>
-                        <div class="card-metric rounded-3xl p-8 shadow-2xl relative overflow-hidden \${latestMetric.disk >= 75 ? 'border-orange' : ''}">
-                            <div class="flex justify-between items-start mb-6">
-                                <span class="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Storage Saturation</span>
-                                <span class="text-3xl font-black" style="color: \${diskColor}">\${latestMetric.disk}%</span>
-                            </div>
-                            <div class="mt-6">
-                                <div class="text-[10px] font-bold text-neutral-400 mb-2 uppercase tracking-tighter">\${n.disk || 'N/A'}</div>
-                                <div class="w-full h-1.5 bg-neutral-800 rounded-full overflow-hidden">
-                                    <div class="h-full opacity-80" style="width: \${latestMetric.disk}%; background-color: \${diskColor}"></div>
-                                </div>
-                            </div>
+                        <div class="card-metric rounded-3xl p-8 shadow-2xl relative overflow-hidden">
+                            <span class="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Disk Usage</span>
+                            <div class="text-3xl font-black mt-2" style="color: \${getStatusColor(latest.disk)}">\${latest.disk}%</div>
+                            <p class="text-[8px] text-neutral-500 mt-2">\${n.disk || ''}</p>
                         </div>
                     </div>
 
-                    <div class="bg-neutral-900 border border-neutral-800 rounded-2xl p-6 mb-4">
-                        <h3 class="text-xs font-black text-white uppercase mb-6 tracking-widest">Network Asset Map</h3>
-                        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                            \${(n.scannedDevices || []).map(c => {
-                                let riskHtml = '';
-                                Object.keys(RISKY_PORTS).forEach(port => {
-                                    if (c.description && c.description.includes(port)) {
-                                        riskHtml = \`<div class="risk-badge mb-2"><i class="fas fa-exclamation-triangle mr-1"></i> Risk: \${RISKY_PORTS[port]}</div>\`;
-                                    }
-                                });
-
-                                return \`
-                                <div class="bg-black border border-neutral-800 p-4 rounded-xl hover:border-orange transition-colors">
-                                    \${riskHtml}
-                                    <div class="flex justify-between items-start mb-2">
-                                        <span class="text-[9px] font-mono text-neutral-500 font-bold">\${c.ip}</span>
-                                        \${c.os_fingerprint ? '<span class="text-[7px] text-neutral-400 font-black uppercase">' + c.os_fingerprint + '</span>' : ''}
-                                    </div>
-                                    <h4 class="text-xs font-black text-white uppercase truncate mt-1">\${c.name}</h4>
-                                    <p class="text-[8px] text-neutral-600 uppercase font-bold mt-1">\${c.description}</p>
-                                </div>\`;
-                            }).join('')}
-                        </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                        \${(n.scannedDevices || []).map(c => {
+                            let risk = '';
+                            Object.keys(RISKY_PORTS).forEach(p => { if(c.description?.includes(p)) risk = \`<div class="risk-badge mb-2">Risk: \${RISKY_PORTS[p]}</div>\`; });
+                            return \`<div class="bg-black border border-[#444444] p-4 rounded-xl hover:border-orange">
+                                \${risk}
+                                <span class="text-[9px] font-mono text-neutral-500">\${c.ip}</span>
+                                <h4 class="text-xs font-black text-white uppercase truncate mt-1">\${c.name || 'Device'}</h4>
+                            </div>\`;
+                        }).join('')}
                     </div>\`;
             }
 
+            function updateBranding() {
+                document.getElementById('headerTitle').innerText = currentSettings.siteTitle || "HUB";
+                document.getElementById('headerLogo').src = currentSettings.logoUrl || "";
+            }
+
+            function renderAuditLogs(logs) {
+                const list = document.getElementById('auditLogList');
+                if (list) list.innerHTML = logs.map(l => \`<div>[\${new Date(l.timestamp).toLocaleTimeString()}] \${l.action} // \${l.target}</div>\`).join('');
+            }
+
+            function updateAdminList() {
+                const list = document.getElementById('adminList');
+                if (list) list.innerHTML = (currentSettings.allowedAdmins || []).map(email => \`
+                    <div class="flex justify-between items-center bg-[#1a1a1a] p-3 rounded-xl border border-[#333333]">
+                        <span class="text-[10px] font-bold text-neutral-400 font-mono">\${email}</span>
+                        <button onclick="window.removeAdmin('\${email}')" class="text-neutral-700 hover:text-red-500"><i class="fas fa-times"></i></button>
+                    </div>\`).join('');
+            }
+
+            window.addAdmin = async () => {
+                const email = document.getElementById('newAdminEmail').value.trim();
+                if(!email) return;
+                const admins = [...(currentSettings.allowedAdmins || [])];
+                if(!admins.includes(email)) admins.push(email);
+                await saveSettings({ allowedAdmins: admins });
+                document.getElementById('newAdminEmail').value = "";
+            };
+
+            window.removeAdmin = async (email) => {
+                const admins = (currentSettings.allowedAdmins || []).filter(e => e !== email);
+                await saveSettings({ allowedAdmins: admins });
+            };
+
             async function saveSettings(extra = {}) {
-                const adminEmail = document.getElementById('adminEmailDisplay').innerText;
                 const data = { 
                     siteTitle: document.getElementById('cfgTitle').value || currentSettings.siteTitle, 
                     logoUrl: document.getElementById('cfgLogo').value || currentSettings.logoUrl,
                     webhookUrl: document.getElementById('cfgWebhook').value || currentSettings.webhookUrl,
-                    adminEmail,
                     ...extra 
                 };
                 await fetch('/api/update-settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
             }
 
-            function render() {
-                const filter = (document.getElementById('globalFilter').value || "").toLowerCase();
-                if (activeNodeId) renderExplorer();
-                else renderList(filter);
-            }
-
             window.saveConfig = async () => { await saveSettings(); toggleView('dashboard'); };
-            window.addAdmin = async () => {
-                const emailInput = document.getElementById('newAdminEmail');
-                const email = emailInput.value.trim();
-                if(!email) return;
-                const admins = [...(currentSettings.allowedAdmins || [])];
-                if(!admins.includes(email)) admins.push(email);
-                await saveSettings({ allowedAdmins: admins });
-                emailInput.value = "";
-                const res = await fetch('/api/status');
-                const json = await res.json();
-                currentSettings = json.settings;
-                updateAdminList();
-            };
-            window.removeAdmin = async (email) => {
-                const admins = (currentSettings.allowedAdmins || []).filter(e => e !== email);
-                await saveSettings({ allowedAdmins: admins });
-                const res = await fetch('/api/status');
-                const json = await res.json();
-                currentSettings = json.settings;
-                updateAdminList();
-            };
-            document.getElementById("globalFilter").addEventListener("input", render);
+            document.getElementById("globalFilter")?.addEventListener("input", render);
         </script>
     </body>
     </html>
