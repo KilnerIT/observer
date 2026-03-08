@@ -1,11 +1,11 @@
 /**
- * Observer Central - Enterprise Infrastructure Hub v2.2.0
+ * Observer Central - Enterprise Infrastructure Hub v2.3.0
  * Features:
- * - Explorer Overhaul: High-impact metric cards for CPU, RAM, and Storage
- * - Advanced Trend Visualization: Larger SVG sparklines for node-specific drill-down
- * - Storage Parsing: Converts disk strings to percentage metrics for history tracking
+ * - Industrial Palette: Deep Greys with Safety Orange highlights
+ * - Smart Thresholds: CPU, RAM, and Disk color-coding (75% Amber, 95% Red)
+ * - Dynamic Sparklines: Trend lines now inherit color from performance status
+ * - Explorer Overhaul: Metric cards with real-time threshold monitoring
  * - Unified Navigation: Persistent Home access and Admin utility bar
- * - Audit Logging: Tracking of all administrative and auth events
  */
 
 const http = require('http');
@@ -19,7 +19,7 @@ const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/aut
 const { getFirestore, doc, setDoc, getDoc, collection, getDocs, updateDoc, addDoc, query, limit } = require('firebase/firestore');
 
 // --- CONFIGURATION ---
-const VERSION = '2.2.0'; 
+const VERSION = '2.3.0'; 
 const PORT = process.env.PORT || 8080; 
 const OFFLINE_THRESHOLD = 60000;
 const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
@@ -121,7 +121,6 @@ const server = http.createServer(async (req, res) => {
                 const uptimeStats = processUptime(data.id, data);
                 const existing = nodes.get(data.id) || { scannedDevices: [], metricsHistory: [] };
                 
-                // Parse disk for history
                 let diskPercent = 0;
                 if (data.disk && data.disk.includes('/')) {
                     const parts = data.disk.split('/').map(p => parseFloat(p));
@@ -206,31 +205,36 @@ function generateUI(cfg) {
             @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700;900&display=swap');
             body { font-family: 'Inter', sans-serif; background-color: #0a0a0a; color: #e5e5e5; }
             .node-row { background: #171717; border: 1px solid #262626; transition: all 0.2s ease; }
-            .node-row:hover { border-color: #404040; background: #1c1c1c; }
+            .node-row:hover { border-color: #f97316; background: #1c1c1c; }
             .nav-blur { background: rgba(10, 10, 10, 0.8); backdrop-filter: blur(12px); border-bottom: 1px solid #262626; }
             .uptime-bar { height: 3px; border-radius: 2px; background: #262626; overflow: hidden; }
-            .uptime-fill { height: 100%; background: #ffffff; opacity: 0.8; }
+            .uptime-fill { height: 100%; background: #f97316; opacity: 0.8; }
             .hidden { display: none !important; }
-            .sparkline { stroke: #525252; stroke-width: 1.5; fill: none; }
-            .sparkline-lg { stroke: #ffffff; stroke-width: 2; fill: none; }
-            input:focus { outline: none; border-color: #525252 !important; }
-            .card-metric { background: #171717; border: 1px solid #262626; }
+            .sparkline { stroke: #404040; stroke-width: 1.5; fill: none; }
+            .sparkline-active { stroke: #f97316; stroke-width: 1.5; fill: none; }
+            .sparkline-lg { stroke-width: 2.5; fill: none; }
+            input:focus { outline: none; border-color: #f97316 !important; }
+            .card-metric { background: #171717; border: 1px solid #262626; transition: border-color 0.3s ease; }
+            .btn-primary { background: #f97316; color: #000; }
+            .btn-primary:hover { background: #fb923c; }
+            .accent-orange { color: #f97316; }
+            .border-orange { border-color: #f97316 !important; }
         </style>
     </head>
     <body class="min-h-screen flex flex-col antialiased">
         <div id="authView" class="fixed inset-0 z-[300] bg-[#0a0a0a] flex items-center justify-center p-6">
             <div class="max-w-md w-full text-center">
-                <i class="fas fa-eye text-white text-5xl mb-6"></i>
+                <i class="fas fa-eye text-[#f97316] text-5xl mb-6"></i>
                 <h1 class="text-3xl font-black text-white tracking-tighter uppercase mb-2">Observer Access</h1>
                 <p class="text-neutral-500 text-[9px] font-bold uppercase tracking-[0.4em] mb-12">Security Operation Center</p>
                 <div id="loginActions">
-                    <button onclick="login()" class="w-full bg-white text-black flex items-center justify-center gap-3 py-4 rounded-xl font-bold mb-8">Authorize with Google</button>
-                    <button onclick="showBackdoor()" class="text-[9px] text-neutral-600 font-bold uppercase tracking-widest">Emergency Bypass</button>
+                    <button onclick="login()" class="btn-primary w-full flex items-center justify-center gap-3 py-4 rounded-xl font-bold mb-8 transition-transform active:scale-95">Authorize with Google</button>
+                    <button onclick="showBackdoor()" class="text-[9px] text-neutral-600 font-bold uppercase tracking-widest hover:text-[#f97316]">Emergency Bypass</button>
                 </div>
                 <div id="backdoorView" class="hidden bg-neutral-900 border border-neutral-800 p-8 rounded-3xl">
                     <input type="text" id="bdUser" placeholder="ID" class="w-full bg-black border border-neutral-800 rounded-xl px-4 py-3 text-sm mb-3">
                     <input type="password" id="bdPass" placeholder="Token" class="w-full bg-black border border-neutral-800 rounded-xl px-4 py-3 text-sm mb-6">
-                    <button onclick="tryBackdoor()" class="w-full py-3 bg-white text-black rounded-xl font-bold uppercase text-[10px] mb-4">Confirm</button>
+                    <button onclick="tryBackdoor()" class="w-full py-3 btn-primary rounded-xl font-bold uppercase text-[10px] mb-4">Confirm</button>
                     <button onclick="hideBackdoor()" class="text-neutral-500 text-[9px] font-bold uppercase tracking-widest">Cancel</button>
                 </div>
             </div>
@@ -238,16 +242,16 @@ function generateUI(cfg) {
 
         <nav id="adminBar" class="hidden sticky top-0 z-[100] nav-blur px-6 py-3 flex items-center gap-8">
             <div class="flex items-center gap-3 min-w-max cursor-pointer" onclick="toggleView('dashboard')">
-                <img id="headerLogo" src="" class="w-6 h-6 object-contain grayscale" alt="">
+                <img id="headerLogo" src="" class="w-6 h-6 object-contain" alt="">
                 <h1 id="headerTitle" class="text-sm font-black text-white uppercase"></h1>
             </div>
-            <button onclick="toggleView('dashboard')" class="text-neutral-500 hover:text-white transition-colors p-2"><i class="fas fa-home text-sm"></i></button>
+            <button onclick="toggleView('dashboard')" class="text-neutral-500 hover:text-[#f97316] transition-colors p-2"><i class="fas fa-home text-sm"></i></button>
             <div class="flex-1 max-w-xl relative">
                 <i class="fas fa-search absolute left-4 top-1/2 -translate-y-1/2 text-neutral-600 text-[10px]"></i>
                 <input type="text" id="globalFilter" placeholder="Filter nodes..." class="w-full bg-neutral-900/50 border border-neutral-800 rounded-full pl-10 pr-4 py-1.5 text-xs text-neutral-300">
             </div>
             <div class="flex items-center gap-4 ml-auto">
-                <button onclick="toggleView('config')" class="text-neutral-500 hover:text-white transition-colors"><i class="fas fa-cog text-sm"></i></button>
+                <button onclick="toggleView('config')" class="text-neutral-500 hover:text-[#f97316] transition-colors"><i class="fas fa-cog text-sm"></i></button>
                 <div class="h-4 w-px bg-neutral-800"></div>
                 <span id="adminEmailDisplay" class="text-[9px] font-bold text-neutral-500 uppercase truncate max-w-[120px]">...</span>
                 <button onclick="logout()" class="text-neutral-500 hover:text-red-500 transition-colors"><i class="fas fa-sign-out-alt text-sm"></i></button>
@@ -262,7 +266,7 @@ function generateUI(cfg) {
                 <div id="explorerContent"></div>
             </div>
             <div id="configView" class="view-section hidden">
-                <button onclick="toggleView('dashboard')" class="mb-6 text-neutral-500 hover:text-white font-bold text-[10px] uppercase tracking-widest"><i class="fas fa-arrow-left mr-2"></i> Dashboard</button>
+                <button onclick="toggleView('dashboard')" class="mb-6 text-neutral-500 hover:text-[#f97316] font-bold text-[10px] uppercase tracking-widest"><i class="fas fa-arrow-left mr-2"></i> Dashboard</button>
                 <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
                     <div class="bg-neutral-900 border border-neutral-800 rounded-2xl p-8 lg:col-span-2">
                         <h2 class="text-xs font-black text-white mb-6 uppercase tracking-widest">Identity & Alerts</h2>
@@ -270,12 +274,12 @@ function generateUI(cfg) {
                             <input type="text" id="cfgTitle" class="w-full bg-black border border-neutral-800 rounded-lg px-4 py-2 text-xs text-white" placeholder="Network Alias">
                             <input type="text" id="cfgLogo" class="w-full bg-black border border-neutral-800 rounded-lg px-4 py-2 text-xs text-white" placeholder="Logo URL">
                             <input type="text" id="cfgWebhook" class="w-full bg-black border border-neutral-800 rounded-lg px-4 py-2 text-xs text-white" placeholder="Webhook">
-                            <button onclick="saveConfig()" class="w-full py-3 bg-white text-black rounded-lg font-black uppercase text-[10px]">Save</button>
+                            <button onclick="saveConfig()" class="w-full py-3 btn-primary rounded-lg font-black uppercase text-[10px]">Save Changes</button>
                         </div>
                     </div>
                     <div class="bg-neutral-900 border border-neutral-800 rounded-2xl p-8">
                         <h2 class="text-xs font-black text-white mb-6 uppercase tracking-widest">Audit</h2>
-                        <div id="auditLogList" class="space-y-1 text-[8px] font-mono"></div>
+                        <div id="auditLogList" class="space-y-1 text-[8px] font-mono text-neutral-400"></div>
                     </div>
                 </div>
             </div>
@@ -283,11 +287,11 @@ function generateUI(cfg) {
 
         <footer id="mainFooter" class="hidden px-6 py-4 border-t border-neutral-900 text-[8px] font-bold text-neutral-600 flex justify-between items-center bg-[#0a0a0a]">
             <div class="flex items-center gap-6">
-                <span>&copy; 2026 OBSERVER</span>
+                <span>&copy; 2026 OBSERVER INTELLIGENCE</span>
                 <span class="text-neutral-800">|</span>
-                <span>v${VERSION}</span>
+                <span>SYSTEM VERSION: v${VERSION}</span>
                 <span class="text-neutral-800">|</span>
-                <button onclick="toggleView('dashboard')" class="hover:text-white transition-colors">HOME</button>
+                <button onclick="toggleView('dashboard')" class="hover:text-white transition-colors">DASHBOARD</button>
             </div>
         </footer>
 
@@ -332,10 +336,18 @@ function generateUI(cfg) {
                 return possible > 0 ? Math.min(Math.round((active / possible) * 100), 100) : 0;
             }
 
+            function getStatusColor(val) {
+                if (val >= 95) return '#ef4444'; // Red
+                if (val >= 75) return '#f59e0b'; // Amber
+                return '#f97316'; // Orange
+            }
+
             function generateSparkline(history, key, w=50, h=20, cls='sparkline') {
                 if (!history || history.length < 2) return \`<svg width="\${w}" height="\${h}"></svg>\`;
+                const latestVal = history[history.length-1][key];
+                const color = getStatusColor(latestVal);
                 const points = history.map((p, i) => \`\${(i * (w / 23))},\${h - (p[key] / 100 * h)}\`).join(' ');
-                return \`<svg width="\${w}" height="\${h}" class="\${cls}"><polyline points="\${points}"/></svg>\`;
+                return \`<svg width="\${w}" height="\${h}" class="\${cls}" style="stroke: \${color}"><polyline points="\${points}"/></svg>\`;
             }
 
             onAuthStateChanged(auth, async (user) => {
@@ -347,7 +359,7 @@ function generateUI(cfg) {
                     document.getElementById('mainApp').classList.remove('hidden');
                     document.getElementById('adminBar').classList.remove('hidden');
                     document.getElementById('mainFooter').classList.remove('hidden');
-                    document.getElementById('adminEmailDisplay').innerText = backdoorActive ? "ROOT" : user.email;
+                    document.getElementById('adminEmailDisplay').innerText = backdoorActive ? "ROOT_BYPASS" : user.email;
                     initApp(json);
                 }
             });
@@ -398,11 +410,11 @@ function generateUI(cfg) {
                         <div class="flex items-center gap-6">
                             \${generateSparkline(n.metricsHistory, 'cpu')}
                             <div class="text-center min-w-[40px]">
-                                <p class="text-[7px] text-neutral-600 uppercase">Health</p>
-                                <p class="text-[9px] font-black">\${getUptime(n.uptimeStats, 7)}%</p>
+                                <p class="text-[7px] text-neutral-600 uppercase">7D Health</p>
+                                <p class="text-[9px] font-black accent-orange">\${getUptime(n.uptimeStats, 7)}%</p>
                             </div>
                         </div>
-                        <button onclick="window.launchExplorer('\${n.id}')" class="px-4 py-2 bg-neutral-900 border border-neutral-800 rounded-lg text-[8px] font-black uppercase">Explore</button>
+                        <button onclick="window.launchExplorer('\${n.id}')" class="px-4 py-2 bg-neutral-900 border border-neutral-800 rounded-lg text-[8px] font-black uppercase hover:border-orange transition-colors">Explore</button>
                     </div>\`).join("");
             }
 
@@ -414,40 +426,44 @@ function generateUI(cfg) {
                 if(!n) return;
 
                 const latestMetric = n.metricsHistory?.[n.metricsHistory.length - 1] || { cpu: 0, ram: 0, disk: 0 };
+                
+                const cpuColor = getStatusColor(latestMetric.cpu);
+                const ramColor = getStatusColor(latestMetric.ram);
+                const diskColor = getStatusColor(latestMetric.disk);
 
                 grid.innerHTML = \`
-                    <button onclick="window.toggleView('dashboard')" class="mb-6 text-neutral-500 hover:text-white font-bold text-[10px] uppercase tracking-widest"><i class="fas fa-arrow-left mr-2"></i> Dashboard</button>
+                    <button onclick="window.toggleView('dashboard')" class="mb-6 text-neutral-500 hover:text-[#f97316] font-bold text-[10px] uppercase tracking-widest transition-colors"><i class="fas fa-arrow-left mr-2"></i> Dashboard</button>
                     
                     <div class="mb-10 text-left">
                         <h2 class="text-3xl font-black text-white uppercase tracking-tighter mb-1">\${n.location || n.hostname}</h2>
-                        <p class="text-neutral-500 text-[10px] font-bold uppercase tracking-widest">\${n.hostname} // Site Intelligence Snapshot</p>
+                        <p class="text-neutral-500 text-[10px] font-bold uppercase tracking-widest">\${n.hostname} // Intelligent Telemetry Engine</p>
                     </div>
 
                     <!-- Metrics Grid -->
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
-                        <div class="card-metric rounded-3xl p-8 shadow-2xl relative overflow-hidden">
+                        <div class="card-metric rounded-3xl p-8 shadow-2xl relative overflow-hidden \${latestMetric.cpu >= 75 ? 'border-orange' : ''}">
                             <div class="flex justify-between items-start mb-6">
                                 <span class="text-[10px] font-black text-neutral-500 uppercase tracking-widest">CPU Utilization</span>
-                                <span class="text-3xl font-black text-white">\${latestMetric.cpu}%</span>
+                                <span class="text-3xl font-black" style="color: \${cpuColor}">\${latestMetric.cpu}%</span>
                             </div>
                             <div class="mt-4">\${generateSparkline(n.metricsHistory, 'cpu', 300, 60, 'sparkline-lg')}</div>
                         </div>
-                        <div class="card-metric rounded-3xl p-8 shadow-2xl relative overflow-hidden">
+                        <div class="card-metric rounded-3xl p-8 shadow-2xl relative overflow-hidden \${latestMetric.ram >= 75 ? 'border-orange' : ''}">
                             <div class="flex justify-between items-start mb-6">
                                 <span class="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Memory Load</span>
-                                <span class="text-3xl font-black text-white">\${latestMetric.ram}%</span>
+                                <span class="text-3xl font-black" style="color: \${ramColor}">\${latestMetric.ram}%</span>
                             </div>
                             <div class="mt-4">\${generateSparkline(n.metricsHistory, 'ram', 300, 60, 'sparkline-lg')}</div>
                         </div>
-                        <div class="card-metric rounded-3xl p-8 shadow-2xl relative overflow-hidden">
+                        <div class="card-metric rounded-3xl p-8 shadow-2xl relative overflow-hidden \${latestMetric.disk >= 75 ? 'border-orange' : ''}">
                             <div class="flex justify-between items-start mb-6">
-                                <span class="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Storage Status</span>
-                                <span class="text-3xl font-black text-white">\${latestMetric.disk}%</span>
+                                <span class="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Storage Saturation</span>
+                                <span class="text-3xl font-black" style="color: \${diskColor}">\${latestMetric.disk}%</span>
                             </div>
                             <div class="mt-6">
                                 <div class="text-[10px] font-bold text-neutral-400 mb-2 uppercase tracking-tighter">\${n.disk || 'N/A'}</div>
                                 <div class="w-full h-1.5 bg-neutral-800 rounded-full overflow-hidden">
-                                    <div class="h-full bg-white opacity-80" style="width: \${latestMetric.disk}%"></div>
+                                    <div class="h-full opacity-80" style="width: \${latestMetric.disk}%; background-color: \${diskColor}"></div>
                                 </div>
                             </div>
                         </div>
@@ -455,10 +471,10 @@ function generateUI(cfg) {
 
                     <!-- Discovery Grid -->
                     <div class="bg-neutral-900 border border-neutral-800 rounded-2xl p-6 mb-4">
-                        <h3 class="text-xs font-black text-white uppercase mb-6 tracking-widest">Discovered Network Assets</h3>
+                        <h3 class="text-xs font-black text-white uppercase mb-6 tracking-widest">Network Asset Map</h3>
                         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                             \${(n.scannedDevices || []).map(c => \`
-                                <div class="bg-black border border-neutral-800 p-4 rounded-xl">
+                                <div class="bg-black border border-neutral-800 p-4 rounded-xl hover:border-orange transition-colors">
                                     <div class="flex justify-between items-start mb-2">
                                         <span class="text-[9px] font-mono text-neutral-500 font-bold">\${c.ip}</span>
                                         \${c.os_fingerprint ? '<span class="text-[7px] text-neutral-400 font-black uppercase">' + c.os_fingerprint + '</span>' : ''}
