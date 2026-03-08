@@ -1,10 +1,10 @@
 /**
- * Observer Central - Enterprise Infrastructure Hub v2.6.0
- * * MAINTENANCE & AGEND UPDATE:
- * - Maintenance Agenda: New dedicated view to track all silenced nodes and durations.
- * - Health Protection: Maintenance periods no longer penalize site health/uptime stats.
- * - Hybrid UI Cloud: Supports hot-swappable front-ends via Firestore.
- * - Resilience: Maintenance status persists across server restarts via Firebase Sync.
+ * Observer Central - Enterprise Infrastructure Hub v2.6.1
+ * * UPTIME ANALYTICS UPDATE:
+ * - Global Health: Aggregate fleet uptime % displayed in the persistent header.
+ * - Tri-Period Metrics: 24h, 7d, and 30d health stats integrated into Explorer view.
+ * - Performance Logic: Maintenance windows continue to be "Excused" from health penalties.
+ * - UI Polish: Standardized health cards with period-specific labels.
  */
 
 const http = require('http');
@@ -18,7 +18,7 @@ const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/aut
 const { getFirestore, doc, setDoc, getDoc, collection, getDocs, updateDoc, addDoc, query, limit } = require('firebase/firestore');
 
 // --- CONFIGURATION ---
-const VERSION = '2.6.0'; 
+const VERSION = '2.6.1'; 
 const PORT = process.env.PORT || 8080; 
 const OFFLINE_THRESHOLD = 60000;
 const CONFIG_PATH = path.join(__dirname, 'config.json');
@@ -116,8 +116,7 @@ function processUptime(nodeId, data) {
         // Normal check-in
         uptimeStats.buckets[today] += deltaSeconds;
     } else if (inMaintenance && deltaSeconds > 0) {
-        // If in maintenance and offline, we "Excused" the downtime by counting it as active
-        // This ensures health status stays at 100% during scheduled windows
+        // Maintenance periods are counted as uptime for health stats
         uptimeStats.buckets[today] += deltaSeconds;
     }
     
@@ -250,7 +249,7 @@ function generateLocalUI(cfg) {
             .sparkline { stroke: #404040; stroke-width: 1.5; fill: none; }
             .sparkline-lg { stroke-width: 2.5; fill: none; }
             input:focus { outline: none; border-color: #f97316 !important; }
-            .card-metric { background: #262626; border: 1px solid #333333; }
+            .card-metric { background: #262626; border: 1px solid #333333; transition: all 0.3s ease; }
             .btn-primary { background: #f97316; color: #000; }
             .accent-orange { color: #f97316; }
             .risk-badge { background: #ef4444; color: white; padding: 2px 6px; border-radius: 4px; font-size: 7px; font-weight: 900; text-transform: uppercase; }
@@ -288,11 +287,16 @@ function generateLocalUI(cfg) {
                 <button onclick="toggleView('dashboard')" class="text-neutral-500 hover:text-[#f97316] transition-colors p-2"><i class="fas fa-home text-sm"></i></button>
                 <button onclick="toggleView('agenda')" class="text-neutral-500 hover:text-[#f97316] transition-colors p-2"><i class="fas fa-calendar-alt text-sm"></i></button>
             </div>
-            <div class="flex-1 max-w-xl relative">
+            <div class="flex-1 max-w-sm relative">
                 <i class="fas fa-search absolute left-4 top-1/2 -translate-y-1/2 text-neutral-600 text-[10px]"></i>
-                <input type="text" id="globalFilter" placeholder="Search operational fleet..." class="w-full bg-neutral-900/50 border border-neutral-800 rounded-full pl-10 pr-4 py-1.5 text-xs text-neutral-300 focus:ring-0">
+                <input type="text" id="globalFilter" placeholder="Search fleet..." class="w-full bg-neutral-900/50 border border-neutral-800 rounded-full pl-10 pr-4 py-1.5 text-xs text-neutral-300 focus:ring-0">
             </div>
             <div class="flex items-center gap-4 ml-auto">
+                <div class="hidden md:flex flex-col items-end">
+                    <span class="text-[7px] font-black text-neutral-500 uppercase tracking-widest">Fleet Health</span>
+                    <span id="globalHealthDisplay" class="text-xs font-black text-emerald-500">100%</span>
+                </div>
+                <div class="h-4 w-px bg-neutral-800"></div>
                 <button onclick="toggleView('config')" class="text-neutral-500 hover:text-[#f97316] transition-colors"><i class="fas fa-cog text-sm"></i></button>
                 <div class="h-4 w-px bg-neutral-800"></div>
                 <span id="adminEmailDisplay" class="text-[9px] font-bold text-neutral-500 uppercase truncate max-w-[120px]">...</span>
@@ -377,19 +381,36 @@ function generateLocalUI(cfg) {
             window.hideBackdoor = () => { document.getElementById('loginActions').classList.remove('hidden'); document.getElementById('backdoorView').classList.add('hidden'); };
             window.tryBackdoor = () => { if(document.getElementById('bdUser').value === "${BACKDOOR_USER}" && document.getElementById('bdPass').value === "${BACKDOOR_PASS}") { sessionStorage.setItem('observer_bypass', 'true'); location.reload(); } else alert("Access Denied"); };
 
-            function getStatusColor(val) { return val >= 95 ? '#ef4444' : (val >= 75 ? '#f59e0b' : '#f97316'); }
+            function getStatusColor(val) { return val >= 95 ? '#10b981' : (val >= 75 ? '#f59e0b' : '#ef4444'); }
 
+            /**
+             * Enhanced Uptime Calculation
+             * Now accurately accounts for 'Possible' seconds since first seen
+             */
             function getUptime(stats, days) {
                 if (!stats || !stats.buckets || !stats.firstSeen) return 0;
                 const now = new Date();
                 let active = 0, possible = 0;
                 const regDate = new Date(stats.firstSeen);
                 if (isNaN(regDate.getTime())) return 0;
+
                 for (let i = 0; i < days; i++) {
                     const d = new Date(); d.setDate(now.getDate() - i);
                     const ds = d.toISOString().split('T')[0];
                     if (d >= regDate) {
-                        possible += (ds === regDate.toISOString().split('T')[0] ? Math.floor((now - regDate) / 1000) : 86400);
+                        const isToday = ds === now.toISOString().split('T')[0];
+                        const isFirstDay = ds === regDate.toISOString().split('T')[0];
+
+                        let dayPossible = 86400;
+                        if (isToday) {
+                            const startOfToday = new Date(now); startOfToday.setHours(0,0,0,0);
+                            dayPossible = Math.floor((now - startOfToday) / 1000);
+                        } else if (isFirstDay) {
+                            const endOfFirstDay = new Date(regDate); endOfFirstDay.setHours(23,59,59,999);
+                            dayPossible = Math.floor((endOfFirstDay - regDate) / 1000);
+                        }
+
+                        possible += Math.max(0, dayPossible);
                         active += (stats.buckets[ds] || 0);
                     }
                 }
@@ -438,6 +459,14 @@ function generateLocalUI(cfg) {
             function render() {
                 const activeView = Array.from(document.querySelectorAll('.view-section')).find(s => !s.classList.contains('hidden'))?.id;
                 
+                // Calculate Global Health (All nodes average for 7 days)
+                if (currentData.length > 0) {
+                    const avg = Math.round(currentData.reduce((acc, n) => acc + getUptime(n.uptimeStats, 7), 0) / currentData.length);
+                    const el = document.getElementById('globalHealthDisplay');
+                    el.innerText = \`\${avg}%\`;
+                    el.className = avg >= 95 ? 'text-emerald-500 font-black' : (avg >= 75 ? 'text-amber-500 font-black' : 'text-red-500 font-black');
+                }
+
                 if (activeView === 'agendaView') {
                     renderAgenda();
                 } else if (activeNodeId) {
@@ -471,7 +500,7 @@ function generateLocalUI(cfg) {
                     <div class="\${rowClass} rounded-xl p-4 flex items-center gap-6 text-left relative transition-all duration-300">
                         <div class="w-1.5 h-1.5 rounded-full \${isMaint ? 'bg-amber-500 shadow-[0_0_8px_#f59e0b]' : (n.isOnline ? 'bg-emerald-500 shadow-[0_0_8px_#10b981]' : 'bg-red-500')}"></div>
                         <div class="flex-1 min-w-0">
-                            <h3 class="text-sm font-black text-white uppercase">\${n.location || n.hostname} \${isMaint ? '<span class="ml-2 text-[8px] text-amber-500">[MAINTENANCE ACTIVE]</span>' : ''}</h3>
+                            <h3 class="text-sm font-black text-white uppercase">\${n.location || n.hostname} \${isMaint ? '<span class="ml-2 text-[8px] text-amber-500">[MAINT]</span>' : ''}</h3>
                             <p class="text-[8px] text-neutral-500 uppercase font-mono">\${n.hostname} // \${n.ip}</p>
                         </div>
                         <div class="flex items-center gap-6">
@@ -500,7 +529,7 @@ function generateLocalUI(cfg) {
                 if (maintNodes.length === 0) {
                     list.innerHTML = \`<div class="p-20 text-center bg-[#262626] rounded-3xl border border-dashed border-neutral-800">
                         <i class="fas fa-calendar-check text-neutral-700 text-4xl mb-4"></i>
-                        <p class="text-[10px] font-black uppercase text-neutral-500 tracking-widest">All Nodes Operational. No Active Maintenance Windows.</p>
+                        <p class="text-[10px] font-black uppercase text-neutral-500 tracking-widest">No Active Maintenance Windows.</p>
                     </div>\`;
                     return;
                 }
@@ -514,13 +543,13 @@ function generateLocalUI(cfg) {
                         </div>
                         <div class="flex-1">
                             <h3 class="text-lg font-black text-white uppercase tracking-tighter">\${n.location || n.hostname}</h3>
-                            <p class="text-[10px] text-amber-500/80 font-bold uppercase tracking-widest">Silenced // Maintenance Window Active</p>
+                            <p class="text-[10px] text-amber-500/80 font-bold uppercase tracking-widest">Silenced // Maintenance Active</p>
                         </div>
                         <div class="text-right">
-                            <p class="text-[8px] text-neutral-500 uppercase font-black mb-1">Estimated Completion</p>
-                            <p class="text-xl font-black text-white">\${timeLeft} <span class="text-[10px] text-neutral-500 uppercase">Minutes</span></p>
+                            <p class="text-[8px] text-neutral-500 uppercase font-black mb-1">Time Remaining</p>
+                            <p class="text-xl font-black text-white">\${timeLeft} <span class="text-[10px] text-neutral-500 uppercase">Min</span></p>
                         </div>
-                        <button onclick="window.setMaintenance('\${n.id}', 0)" class="px-6 py-3 bg-amber-600 hover:bg-amber-500 text-black rounded-xl font-black uppercase text-[10px] transition-all">Resume Monitoring</button>
+                        <button onclick="window.setMaintenance('\${n.id}', 0)" class="px-6 py-3 bg-amber-600 hover:bg-amber-500 text-black rounded-xl font-black uppercase text-[10px] transition-all">End Session</button>
                     </div>\`;
                 }).join("");
             }
@@ -554,10 +583,15 @@ function generateLocalUI(cfg) {
                 if(!n || !grid) return;
                 const latest = n.metricsHistory?.[n.metricsHistory.length - 1] || { cpu: 0, ram: 0, disk: 0 };
                 const isMaint = n.maintenanceUntil && n.maintenanceUntil > Date.now();
+                
+                // Multi-Period Health
+                const u24h = getUptime(n.uptimeStats, 1);
+                const u7d = getUptime(n.uptimeStats, 7);
+                const u30d = getUptime(n.uptimeStats, 30);
 
                 grid.innerHTML = \`
                     <div class="flex items-center justify-between mb-8">
-                        <button onclick="window.toggleView('dashboard')" class="text-neutral-500 hover:text-[#f97316] font-bold text-[10px] uppercase tracking-widest transition-colors"><i class="fas fa-arrow-left mr-2"></i> Operational Dashboard</button>
+                        <button onclick="window.toggleView('dashboard')" class="text-neutral-500 hover:text-[#f97316] font-bold text-[10px] uppercase tracking-widest transition-colors"><i class="fas fa-arrow-left mr-2"></i> Dashboard</button>
                         \${isMaint ? '<span class="bg-amber-600 text-black px-4 py-1.5 rounded-full text-[9px] font-black uppercase">Alerts Silenced</span>' : ''}
                     </div>
                     
@@ -570,30 +604,48 @@ function generateLocalUI(cfg) {
 
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
                         <div class="card-metric rounded-3xl p-8 shadow-2xl relative overflow-hidden">
-                            <span class="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Compute Core</span>
+                            <span class="text-[10px] font-black text-neutral-500 uppercase tracking-widest">CPU</span>
                             <div class="text-3xl font-black mt-2" style="color: \${getStatusColor(latest.cpu)}">\${latest.cpu}%</div>
                             <div class="mt-4">\${generateSparkline(n.metricsHistory, 'cpu', 300, 60, 'sparkline-lg')}</div>
                         </div>
                         <div class="card-metric rounded-3xl p-8 shadow-2xl relative overflow-hidden">
-                            <span class="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Memory Allocation</span>
+                            <span class="text-[10px] font-black text-neutral-500 uppercase tracking-widest">RAM</span>
                             <div class="text-3xl font-black mt-2" style="color: \${getStatusColor(latest.ram)}">\${latest.ram}%</div>
                             <div class="mt-4">\${generateSparkline(n.metricsHistory, 'ram', 300, 60, 'sparkline-lg')}</div>
                         </div>
                         <div class="card-metric rounded-3xl p-8 shadow-2xl relative overflow-hidden">
-                            <span class="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Storage Footprint</span>
+                            <span class="text-[10px] font-black text-neutral-500 uppercase tracking-widest">DISK</span>
                             <div class="text-3xl font-black mt-2" style="color: \${getStatusColor(latest.disk)}">\${latest.disk}%</div>
                             <p class="text-[8px] text-neutral-500 mt-2 font-mono uppercase font-bold">\${n.disk || 'Scanning...'}</p>
                         </div>
                     </div>
 
+                    <div class="mb-8 p-8 bg-neutral-900 border border-neutral-800 rounded-3xl">
+                         <h3 class="text-xs font-black text-white uppercase mb-6 tracking-widest">Health History</h3>
+                         <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+                            <div class="border-l-2 border-[#333] pl-6">
+                                <p class="text-[9px] font-black text-neutral-600 uppercase mb-2">Last 24 Hours</p>
+                                <p class="text-2xl font-black" style="color: \${getStatusColor(u24h)}">\${u24h}%</p>
+                            </div>
+                            <div class="border-l-2 border-[#333] pl-6">
+                                <p class="text-[9px] font-black text-neutral-600 uppercase mb-2">Last 7 Days</p>
+                                <p class="text-2xl font-black" style="color: \${getStatusColor(u7d)}">\${u7d}%</p>
+                            </div>
+                            <div class="border-l-2 border-[#333] pl-6">
+                                <p class="text-[9px] font-black text-neutral-600 uppercase mb-2">Last 30 Days</p>
+                                <p class="text-2xl font-black" style="color: \${getStatusColor(u30d)}">\${u30d}%</p>
+                            </div>
+                         </div>
+                    </div>
+
                     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                         \${(n.scannedDevices || []).map(c => {
                             let risk = '';
-                            Object.keys(RISKY_PORTS).forEach(p => { if(c.description?.includes(p)) risk = \`<div class="risk-badge mb-2">Security Risk: \${RISKY_PORTS[p]}</div>\`; });
+                            Object.keys(RISKY_PORTS).forEach(p => { if(c.description?.includes(p)) risk = \`<div class="risk-badge mb-2">Risk: \${RISKY_PORTS[p]}</div>\`; });
                             return \`<div class="bg-black border border-[#444444] p-4 rounded-xl hover:border-orange transition-all">
                                 \${risk}
                                 <span class="text-[9px] font-mono text-neutral-500">\${c.ip}</span>
-                                <h4 class="text-xs font-black text-white uppercase truncate mt-1">\${c.name || 'Discovered Asset'}</h4>
+                                <h4 class="text-xs font-black text-white uppercase truncate mt-1">\${c.name || 'Discovered'}</h4>
                             </div>\`;
                         }).join('')}
                     </div>\`;
