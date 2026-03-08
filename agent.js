@@ -15,6 +15,7 @@ const { exec, execSync } = require('child_process');
 const crypto = require('crypto');
 
 // --- CONFIGURATION ---
+const VERSION = '2.4.0'; 
 // Replace with your actual Render/Server URL
 const SERVER_URL = 'https://observer-sxv0.onrender.com/api/heartbeat';
 const SCAN_INTERVAL = 300000; // Deep scan every 5 minutes
@@ -147,7 +148,13 @@ function sendPayload(scannedDevices = []) {
 }
 
 // Initiation
-log(`Agent v${VERSION} Online. ClientID: ${clientId}`);
+console.log(`\x1b[38;5;208m`); // Set color to Safety Orange
+console.log(`==========================================`);
+console.log(` OBSERVER NODE AGENT v${VERSION}`);
+console.log(` ClientID: ${clientId}`);
+console.log(` Status:   INITIALIZING ENGINE...`);
+console.log(`==========================================\x1b[0m`);
+
 performDiscovery();
 setInterval(performDiscovery, SCAN_INTERVAL);
 setInterval(() => sendPayload([]), HEARTBEAT_INTERVAL);
