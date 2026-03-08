@@ -1,12 +1,12 @@
 /**
- * Observer Central - Enterprise Infrastructure Hub v2.4.1
+ * Observer Central - Enterprise Infrastructure Hub v2.4.2
  * Features:
  * - Maintenance Windows: 2-hour alert silencing with UI toggle and visual indicator
  * - Network Topology: Hub-and-spoke SVG visualization for asset relationships
  * - Vulnerability Analysis: Automated flagging of risky ports (RDP, FTP, Telnet, etc.)
- * - Industrial Palette: Obsidian and Carbon Greys with Safety Orange highlights
+ * - Industrial Palette: Slate and Carbon Greys with Safety Orange highlights
  * - Access Control: Persistent MFA/OAuth administrator management
- * - Bugfix: Added safety guards for IP detection and Uptime calculation to prevent GUI crashes
+ * - UI Resilience: Added Empty State handlers and crash-proof discovery filters
  */
 
 const http = require('http');
@@ -20,7 +20,7 @@ const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/aut
 const { getFirestore, doc, setDoc, getDoc, collection, getDocs, updateDoc, addDoc, query, limit } = require('firebase/firestore');
 
 // --- CONFIGURATION ---
-const VERSION = '2.4.1'; 
+const VERSION = '2.4.2'; 
 const PORT = process.env.PORT || 8080; 
 const OFFLINE_THRESHOLD = 60000;
 const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
@@ -145,7 +145,8 @@ const server = http.createServer(async (req, res) => {
                     }
                 });
 
-                const clientIp = (req.socket.remoteAddress || req.headers['x-forwarded-for'] || '').replace('::ffff:', '');
+                const rawIp = req.socket.remoteAddress || String(req.headers['x-forwarded-for'] || '');
+                const clientIp = rawIp.replace('::ffff:', '');
                 const nodeUpdate = { ...existing, ...data, isArchived: false, uptimeStats, metricsHistory, scannedDevices: mergedDevices, lastSeen: Date.now(), ip: clientIp };
                 
                 nodes.set(data.id, nodeUpdate);
@@ -234,30 +235,30 @@ function generateUI(cfg) {
         <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700;900&display=swap');
-            body { font-family: 'Inter', sans-serif; background-color: #1a1a1a; color: #e5e5e5; }
-            .node-row { background: #262626; border: 1px solid #333333; transition: all 0.2s ease; }
-            .node-row:hover { border-color: #f97316; background: #2d2d2d; }
-            .nav-blur { background: rgba(26, 26, 26, 0.8); backdrop-filter: blur(12px); border-bottom: 1px solid #333333; }
-            .uptime-bar { height: 3px; border-radius: 2px; background: #333333; overflow: hidden; }
+            body { font-family: 'Inter', sans-serif; background-color: #2b2b2b; color: #e5e5e5; }
+            .node-row { background: #333333; border: 1px solid #444444; transition: all 0.2s ease; }
+            .node-row:hover { border-color: #f97316; background: #3a3a3a; }
+            .nav-blur { background: rgba(33, 33, 33, 0.8); backdrop-filter: blur(12px); border-bottom: 1px solid #444444; }
+            .uptime-bar { height: 3px; border-radius: 2px; background: #444444; overflow: hidden; }
             .uptime-fill { height: 100%; background: #f97316; opacity: 0.8; }
             .hidden { display: none !important; }
-            .sparkline { stroke: #404040; stroke-width: 1.5; fill: none; }
+            .sparkline { stroke: #555555; stroke-width: 1.5; fill: none; }
             .sparkline-active { stroke: #f97316; stroke-width: 1.5; fill: none; }
             .sparkline-lg { stroke-width: 2.5; fill: none; }
             input:focus { outline: none; border-color: #f97316 !important; }
-            .card-metric { background: #262626; border: 1px solid #333333; transition: border-color 0.3s ease; }
+            .card-metric { background: #333333; border: 1px solid #444444; transition: border-color 0.3s ease; }
             .btn-primary { background: #f97316; color: #000; }
             .btn-primary:hover { background: #fb923c; }
             .accent-orange { color: #f97316; }
             .border-orange { border-color: #f97316 !important; }
             .risk-badge { background: #ef4444; color: white; padding: 2px 6px; border-radius: 4px; font-size: 7px; font-weight: 900; text-transform: uppercase; }
-            .topology-line { stroke: #333333; stroke-width: 1; stroke-dasharray: 4; }
-            .topology-node { fill: #262626; stroke: #f97316; stroke-width: 2; }
+            .topology-line { stroke: #444444; stroke-width: 1; stroke-dasharray: 4; }
+            .topology-node { fill: #333333; stroke: #f97316; stroke-width: 2; }
             .topology-center { fill: #f97316; }
         </style>
     </head>
     <body class="min-h-screen flex flex-col antialiased">
-        <div id="authView" class="fixed inset-0 z-[300] bg-[#1a1a1a] flex items-center justify-center p-6">
+        <div id="authView" class="fixed inset-0 z-[300] bg-[#212121] flex items-center justify-center p-6">
             <div class="max-w-md w-full text-center">
                 <i class="fas fa-eye text-[#f97316] text-5xl mb-6"></i>
                 <h1 class="text-3xl font-black text-white tracking-tighter uppercase mb-2">Observer Access</h1>
@@ -266,9 +267,9 @@ function generateUI(cfg) {
                     <button onclick="login()" class="btn-primary w-full flex items-center justify-center gap-3 py-4 rounded-xl font-bold mb-8 transition-transform active:scale-95">Authorize with Google</button>
                     <button onclick="showBackdoor()" class="text-[9px] text-neutral-600 font-bold uppercase tracking-widest hover:text-[#f97316]">Emergency Bypass</button>
                 </div>
-                <div id="backdoorView" class="hidden bg-[#262626] border border-[#333333] p-8 rounded-3xl">
-                    <input type="text" id="bdUser" placeholder="ID" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-xl px-4 py-3 text-sm mb-3">
-                    <input type="password" id="bdPass" placeholder="Token" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-xl px-4 py-3 text-sm mb-6">
+                <div id="backdoorView" class="hidden bg-[#333333] border border-[#444444] p-8 rounded-3xl">
+                    <input type="text" id="bdUser" placeholder="ID" class="w-full bg-[#212121] border border-[#444444] rounded-xl px-4 py-3 text-sm mb-3">
+                    <input type="password" id="bdPass" placeholder="Token" class="w-full bg-[#212121] border border-[#444444] rounded-xl px-4 py-3 text-sm mb-6">
                     <button onclick="tryBackdoor()" class="w-full py-3 btn-primary rounded-xl font-bold uppercase text-[10px] mb-4">Confirm</button>
                     <button onclick="hideBackdoor()" class="text-neutral-500 text-[9px] font-bold uppercase tracking-widest">Cancel</button>
                 </div>
@@ -303,34 +304,34 @@ function generateUI(cfg) {
             <div id="configView" class="view-section hidden text-left">
                 <button onclick="toggleView('dashboard')" class="mb-6 text-neutral-500 hover:text-[#f97316] font-bold text-[10px] uppercase tracking-widest"><i class="fas fa-arrow-left mr-2"></i> Dashboard</button>
                 <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
-                    <div class="bg-[#262626] border border-[#333333] rounded-2xl p-8">
+                    <div class="bg-[#333333] border border-[#444444] rounded-2xl p-8">
                         <h2 class="text-xs font-black text-white mb-6 uppercase tracking-widest">Identity & Alerts</h2>
                         <div class="space-y-4">
-                            <input type="text" id="cfgTitle" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-lg px-4 py-2 text-xs text-white" placeholder="Network Alias">
-                            <input type="text" id="cfgLogo" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-lg px-4 py-2 text-xs text-white" placeholder="Logo URL">
-                            <input type="text" id="cfgWebhook" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-lg px-4 py-2 text-xs text-white" placeholder="Webhook">
+                            <input type="text" id="cfgTitle" class="w-full bg-[#212121] border border-[#444444] rounded-lg px-4 py-2 text-xs text-white" placeholder="Network Alias">
+                            <input type="text" id="cfgLogo" class="w-full bg-[#212121] border border-[#444444] rounded-lg px-4 py-2 text-xs text-white" placeholder="Logo URL">
+                            <input type="text" id="cfgWebhook" class="w-full bg-[#212121] border border-[#444444] rounded-lg px-4 py-2 text-xs text-white" placeholder="Webhook">
                             <button onclick="saveConfig()" class="w-full py-3 btn-primary rounded-lg font-black uppercase text-[10px]">Apply Global Changes</button>
                         </div>
                     </div>
-                    <div class="bg-[#262626] border border-[#333333] rounded-2xl p-8">
+                    <div class="bg-[#333333] border border-[#444444] rounded-2xl p-8">
                         <h2 class="text-xs font-black text-white mb-6 uppercase tracking-widest">Access Control (MFA)</h2>
                         <div class="space-y-4">
                             <div class="flex gap-2">
-                                <input type="email" id="newAdminEmail" class="flex-1 bg-[#1a1a1a] border border-[#333333] rounded-lg px-4 py-2 text-xs text-white" placeholder="user@domain.com">
-                                <button onclick="window.addAdmin()" class="px-4 bg-[#333333] hover:bg-[#444] text-white rounded-lg text-xs transition-all"><i class="fas fa-plus"></i></button>
+                                <input type="email" id="newAdminEmail" class="flex-1 bg-[#212121] border border-[#444444] rounded-lg px-4 py-2 text-xs text-white" placeholder="user@domain.com">
+                                <button onclick="window.addAdmin()" class="px-4 bg-[#444444] hover:bg-[#555] text-white rounded-lg text-xs transition-all"><i class="fas fa-plus"></i></button>
                             </div>
                             <div id="adminList" class="space-y-2 max-h-[160px] overflow-y-auto pr-2"></div>
                         </div>
                     </div>
                 </div>
-                <div class="bg-[#262626] border border-[#333333] rounded-2xl p-8">
+                <div class="bg-[#333333] border border-[#444444] rounded-2xl p-8">
                     <h2 class="text-xs font-black text-white mb-6 uppercase tracking-widest">Administrative Audit Trail</h2>
                     <div id="auditLogList" class="space-y-1 text-[8px] font-mono text-neutral-400"></div>
                 </div>
             </div>
         </main>
 
-        <footer id="mainFooter" class="hidden px-6 py-4 border-t border-neutral-900 text-[8px] font-bold text-neutral-600 flex justify-between items-center bg-[#1a1a1a]">
+        <footer id="mainFooter" class="hidden px-6 py-4 border-t border-neutral-900 text-[8px] font-bold text-neutral-600 flex justify-between items-center bg-[#212121]">
             <div class="flex items-center gap-6">
                 <span>&copy; 2026 OBSERVER INTELLIGENCE</span>
                 <span class="text-neutral-800">|</span>
@@ -381,7 +382,6 @@ function generateUI(cfg) {
                 let active = 0, possible = 0;
                 const regDate = new Date(stats.firstSeen);
                 
-                // Safety check for Invalid Date
                 if (isNaN(regDate.getTime())) return 0;
 
                 for (let i = 0; i < days; i++) {
@@ -413,12 +413,13 @@ function generateUI(cfg) {
                 const res = await fetch('/api/status');
                 const json = await res.json();
                 currentSettings = json.settings;
+                
                 if (backdoorActive || (user && currentSettings.allowedAdmins?.includes(user.email))) {
                     document.getElementById('authView').classList.add('hidden');
                     document.getElementById('mainApp').classList.remove('hidden');
                     document.getElementById('adminBar').classList.remove('hidden');
                     document.getElementById('mainFooter').classList.remove('hidden');
-                    document.getElementById('adminEmailDisplay').innerText = backdoorActive ? "ROOT_BYPASS" : user.email;
+                    document.getElementById('adminEmailDisplay').innerText = backdoorActive ? "ROOT_BYPASS" : (user?.email || "Authenticated");
                     initApp(json);
                 }
             });
@@ -427,12 +428,15 @@ function generateUI(cfg) {
                 currentData = json.nodes;
                 updateBranding();
                 setInterval(async () => {
-                    const r = await fetch('/api/status');
-                    const j = await r.json();
-                    currentData = j.nodes;
-                    currentSettings = j.settings;
-                    render();
-                    if(j.auditLogs) renderAuditLogs(j.auditLogs);
+                    try {
+                        const r = await fetch('/api/status');
+                        const j = await r.json();
+                        currentData = j.nodes;
+                        currentSettings = j.settings;
+                        render();
+                        if(j.auditLogs) renderAuditLogs(j.auditLogs);
+                        updateAdminList();
+                    } catch(e) {}
                 }, 10000);
                 render();
             }
@@ -447,7 +451,7 @@ function generateUI(cfg) {
                 const list = document.getElementById('adminList');
                 if (!list) return;
                 list.innerHTML = (currentSettings.allowedAdmins || []).map(email => \`
-                    <div class="flex justify-between items-center bg-[#1a1a1a] p-3 rounded-xl border border-[#333333]">
+                    <div class="flex justify-between items-center bg-[#212121] p-3 rounded-xl border border-[#444444]">
                         <span class="text-[10px] font-bold text-neutral-400 font-mono">\${email}</span>
                         <button onclick="window.removeAdmin('\${email}')" class="text-neutral-700 hover:text-red-500 transition-colors"><i class="fas fa-times"></i></button>
                     </div>
@@ -466,10 +470,19 @@ function generateUI(cfg) {
             function renderList(filter) {
                 const list = document.getElementById('nodeList');
                 if (!list) return;
-                const filtered = currentData.filter(n => !n.isArchived && ((n.hostname || "").toLowerCase().includes(filter) || (n.location || "").toLowerCase().includes(filter)))
+
+                const nodesToRender = currentData.filter(n => !n.isArchived && ((n.hostname || "").toLowerCase().includes(filter) || (n.location || "").toLowerCase().includes(filter)))
                     .sort((a, b) => (b.isOnline ? 1 : 0) - (a.isOnline ? 1 : 0));
 
-                list.innerHTML = filtered.map(n => {
+                if (nodesToRender.length === 0) {
+                    list.innerHTML = \`<div class="p-12 text-center bg-[#333333] rounded-2xl border border-dashed border-neutral-700">
+                        <i class="fas fa-satellite-dish text-neutral-600 text-3xl mb-4"></i>
+                        <p class="text-[10px] font-black uppercase text-neutral-500 tracking-widest">No infrastructure nodes detected</p>
+                    </div>\`;
+                    return;
+                }
+
+                list.innerHTML = nodesToRender.map(n => {
                     const isMaint = n.maintenanceUntil && n.maintenanceUntil > Date.now();
                     return \`
                     <div class="node-row rounded-xl p-4 flex items-center gap-6 text-left relative">
@@ -486,7 +499,7 @@ function generateUI(cfg) {
                             </div>
                         </div>
                         <div class="flex gap-2">
-                            <button onclick="window.setMaintenance('\${n.id}', \${isMaint ? 0 : 2})" class="p-2 bg-neutral-900 border border-[#333333] rounded-lg text-neutral-600 hover:text-amber-500 transition-colors">
+                            <button onclick="window.setMaintenance('\${n.id}', \${isMaint ? 0 : 2})" class="p-2 bg-neutral-900 border border-[#444444] rounded-lg text-neutral-600 hover:text-amber-500 transition-colors">
                                 <i class="fas \${isMaint ? 'fa-bell' : 'fa-bell-slash'} text-[10px]"></i>
                             </button>
                             <button onclick="window.launchExplorer('\${n.id}')" class="px-4 py-2 bg-neutral-900 border border-neutral-800 rounded-lg text-[8px] font-black uppercase hover:border-orange transition-colors">Explore</button>
@@ -512,33 +525,26 @@ function generateUI(cfg) {
                     const angle = (i / Math.min(devices.length, 12)) * Math.PI * 2;
                     const x = centerX + radius * Math.cos(angle);
                     const y = centerY + radius * Math.sin(angle);
-                    
                     linesHtml += \`<line x1="\${centerX}" y1="\${centerY}" x2="\${x}" y2="\${y}" class="topology-line" />\`;
                     nodesHtml += \`<circle cx="\${x}" cy="\${y}" r="4" class="topology-node" />\`;
                 });
 
-                return \`
-                <div class="bg-black/50 border border-[#333333] rounded-3xl p-4 mb-8 flex justify-center overflow-hidden">
-                    <svg width="\${width}" height="\${height}" viewBox="0 0 \${width} \${height}">
-                        \${linesHtml}
-                        \${nodesHtml}
-                    </svg>
-                </div>\`;
+                return \`<div class="bg-black/20 border border-[#444444] rounded-3xl p-4 mb-8 flex justify-center overflow-hidden"><svg width="\${width}" height="\${height}">\${linesHtml}\${nodesHtml}</svg></div>\`;
             }
 
             function renderExplorer() {
                 const n = currentData.find(x => x.id === activeNodeId);
                 const grid = document.getElementById('explorerContent');
-                if(!n) return;
+                if(!n || !grid) return;
 
                 const latestMetric = n.metricsHistory?.[n.metricsHistory.length - 1] || { cpu: 0, ram: 0, disk: 0 };
                 const cpuColor = getStatusColor(latestMetric.cpu);
                 const ramColor = getStatusColor(latestMetric.ram);
                 const diskColor = getStatusColor(latestMetric.disk);
+                const filter = (document.getElementById('globalFilter')?.value || "").toLowerCase();
 
                 grid.innerHTML = \`
                     <button onclick="window.toggleView('dashboard')" class="mb-6 text-neutral-500 hover:text-[#f97316] font-bold text-[10px] uppercase tracking-widest transition-colors"><i class="fas fa-arrow-left mr-2"></i> Dashboard</button>
-                    
                     <div class="mb-10 text-left">
                         <h2 class="text-3xl font-black text-white uppercase tracking-tighter mb-1">\${n.location || n.hostname}</h2>
                         <p class="text-neutral-500 text-[10px] font-bold uppercase tracking-widest">\${n.hostname} // Intelligent Telemetry Engine</p>
@@ -575,10 +581,10 @@ function generateUI(cfg) {
                         </div>
                     </div>
 
-                    <div class="bg-neutral-900 border border-neutral-800 rounded-2xl p-6 mb-4">
+                    <div class="bg-[#333333] border border-[#444444] rounded-2xl p-6 mb-4">
                         <h3 class="text-xs font-black text-white uppercase mb-6 tracking-widest">Network Asset Map</h3>
                         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                            \${(n.scannedDevices || []).map(c => {
+                            \${(n.scannedDevices || []).filter(c => (c.ip || "").includes(filter) || (c.name || "").toLowerCase().includes(filter)).map(c => {
                                 let riskHtml = '';
                                 Object.keys(RISKY_PORTS).forEach(port => {
                                     if (c.description && c.description.includes(port)) {
@@ -587,14 +593,14 @@ function generateUI(cfg) {
                                 });
 
                                 return \`
-                                <div class="bg-black border border-neutral-800 p-4 rounded-xl hover:border-orange transition-colors">
+                                <div class="bg-black border border-[#444444] p-4 rounded-xl hover:border-orange transition-colors">
                                     \${riskHtml}
                                     <div class="flex justify-between items-start mb-2">
                                         <span class="text-[9px] font-mono text-neutral-500 font-bold">\${c.ip}</span>
                                         \${c.os_fingerprint ? '<span class="text-[7px] text-neutral-400 font-black uppercase">' + c.os_fingerprint + '</span>' : ''}
                                     </div>
-                                    <h4 class="text-xs font-black text-white uppercase truncate mt-1">\${c.name}</h4>
-                                    <p class="text-[8px] text-neutral-600 uppercase font-bold mt-1">\${c.description}</p>
+                                    <h4 class="text-xs font-black text-white uppercase truncate mt-1">\${c.name || 'Unidentified'}</h4>
+                                    <p class="text-[8px] text-neutral-600 uppercase font-bold mt-1">\${c.description || 'Active'}</p>
                                 </div>\`;
                             }).join('')}
                         </div>
@@ -614,7 +620,7 @@ function generateUI(cfg) {
             }
 
             function render() {
-                const filter = (document.getElementById('globalFilter').value || "").toLowerCase();
+                const filter = (document.getElementById('globalFilter')?.value || "").toLowerCase();
                 if (activeNodeId) renderExplorer();
                 else renderList(filter);
             }
@@ -622,12 +628,12 @@ function generateUI(cfg) {
             window.saveConfig = async () => { await saveSettings(); toggleView('dashboard'); };
             window.addAdmin = async () => {
                 const emailInput = document.getElementById('newAdminEmail');
-                const email = emailInput.value.trim();
+                const email = emailInput?.value.trim();
                 if(!email) return;
                 const admins = [...(currentSettings.allowedAdmins || [])];
                 if(!admins.includes(email)) admins.push(email);
                 await saveSettings({ allowedAdmins: admins });
-                emailInput.value = "";
+                if(emailInput) emailInput.value = "";
                 const res = await fetch('/api/status');
                 const json = await res.json();
                 currentSettings = json.settings;
@@ -641,7 +647,13 @@ function generateUI(cfg) {
                 currentSettings = json.settings;
                 updateAdminList();
             };
-            document.getElementById("globalFilter").addEventListener("input", render);
+            window.toggleView = (view) => {
+                document.querySelectorAll('.view-section').forEach(s => s.classList.add('hidden'));
+                document.getElementById(view + 'View').classList.remove('hidden');
+                activeNodeId = (view === 'dashboard') ? null : activeNodeId;
+                if(view === 'config') updateAdminList();
+            };
+            document.getElementById("globalFilter")?.addEventListener("input", render);
         </script>
     </body>
     </html>
