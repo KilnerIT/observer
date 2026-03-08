@@ -1,11 +1,11 @@
 /**
- * Observer Central - Enterprise Infrastructure Hub v2.3.0
+ * Observer Central - Enterprise Infrastructure Hub v2.3.1
  * Features:
- * - Industrial Palette: Deep Greys with Safety Orange highlights
+ * - Industrial Palette: Obsidian and Carbon Greys with Safety Orange highlights
+ * - Admin Management: Full UI-based Access Control List (ACL) for MFA/OAuth
  * - Smart Thresholds: CPU, RAM, and Disk color-coding (75% Amber, 95% Red)
- * - Dynamic Sparklines: Trend lines now inherit color from performance status
- * - Explorer Overhaul: Metric cards with real-time threshold monitoring
- * - Unified Navigation: Persistent Home access and Admin utility bar
+ * - Dynamic Sparklines: Trend lines inherit status colors
+ * - Navigation: Persistent Home access and improved Settings workflow
  */
 
 const http = require('http');
@@ -19,7 +19,7 @@ const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/aut
 const { getFirestore, doc, setDoc, getDoc, collection, getDocs, updateDoc, addDoc, query, limit } = require('firebase/firestore');
 
 // --- CONFIGURATION ---
-const VERSION = '2.3.0'; 
+const VERSION = '2.3.1'; 
 const PORT = process.env.PORT || 8080; 
 const OFFLINE_THRESHOLD = 60000;
 const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
@@ -164,10 +164,12 @@ const server = http.createServer(async (req, res) => {
         let body = '';
         req.on('data', chunk => body += chunk);
         req.on('end', async () => {
-            const data = JSON.parse(body);
-            settings = { ...settings, ...data };
-            if (currentUser) await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config'), settings);
-            res.writeHead(200); res.end(JSON.stringify({ status: 'updated' }));
+            try {
+                const data = JSON.parse(body);
+                settings = { ...settings, ...data };
+                if (currentUser) await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config'), settings);
+                res.writeHead(200); res.end(JSON.stringify({ status: 'updated' }));
+            } catch (e) { res.writeHead(400); res.end('Error'); }
         });
     }
 
@@ -203,18 +205,18 @@ function generateUI(cfg) {
         <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700;900&display=swap');
-            body { font-family: 'Inter', sans-serif; background-color: #0a0a0a; color: #e5e5e5; }
-            .node-row { background: #171717; border: 1px solid #262626; transition: all 0.2s ease; }
-            .node-row:hover { border-color: #f97316; background: #1c1c1c; }
-            .nav-blur { background: rgba(10, 10, 10, 0.8); backdrop-filter: blur(12px); border-bottom: 1px solid #262626; }
-            .uptime-bar { height: 3px; border-radius: 2px; background: #262626; overflow: hidden; }
+            body { font-family: 'Inter', sans-serif; background-color: #1a1a1a; color: #e5e5e5; }
+            .node-row { background: #262626; border: 1px solid #333333; transition: all 0.2s ease; }
+            .node-row:hover { border-color: #f97316; background: #2d2d2d; }
+            .nav-blur { background: rgba(26, 26, 26, 0.8); backdrop-filter: blur(12px); border-bottom: 1px solid #333333; }
+            .uptime-bar { height: 3px; border-radius: 2px; background: #333333; overflow: hidden; }
             .uptime-fill { height: 100%; background: #f97316; opacity: 0.8; }
             .hidden { display: none !important; }
             .sparkline { stroke: #404040; stroke-width: 1.5; fill: none; }
             .sparkline-active { stroke: #f97316; stroke-width: 1.5; fill: none; }
             .sparkline-lg { stroke-width: 2.5; fill: none; }
             input:focus { outline: none; border-color: #f97316 !important; }
-            .card-metric { background: #171717; border: 1px solid #262626; transition: border-color 0.3s ease; }
+            .card-metric { background: #262626; border: 1px solid #333333; transition: border-color 0.3s ease; }
             .btn-primary { background: #f97316; color: #000; }
             .btn-primary:hover { background: #fb923c; }
             .accent-orange { color: #f97316; }
@@ -222,7 +224,7 @@ function generateUI(cfg) {
         </style>
     </head>
     <body class="min-h-screen flex flex-col antialiased">
-        <div id="authView" class="fixed inset-0 z-[300] bg-[#0a0a0a] flex items-center justify-center p-6">
+        <div id="authView" class="fixed inset-0 z-[300] bg-[#1a1a1a] flex items-center justify-center p-6">
             <div class="max-w-md w-full text-center">
                 <i class="fas fa-eye text-[#f97316] text-5xl mb-6"></i>
                 <h1 class="text-3xl font-black text-white tracking-tighter uppercase mb-2">Observer Access</h1>
@@ -231,9 +233,9 @@ function generateUI(cfg) {
                     <button onclick="login()" class="btn-primary w-full flex items-center justify-center gap-3 py-4 rounded-xl font-bold mb-8 transition-transform active:scale-95">Authorize with Google</button>
                     <button onclick="showBackdoor()" class="text-[9px] text-neutral-600 font-bold uppercase tracking-widest hover:text-[#f97316]">Emergency Bypass</button>
                 </div>
-                <div id="backdoorView" class="hidden bg-neutral-900 border border-neutral-800 p-8 rounded-3xl">
-                    <input type="text" id="bdUser" placeholder="ID" class="w-full bg-black border border-neutral-800 rounded-xl px-4 py-3 text-sm mb-3">
-                    <input type="password" id="bdPass" placeholder="Token" class="w-full bg-black border border-neutral-800 rounded-xl px-4 py-3 text-sm mb-6">
+                <div id="backdoorView" class="hidden bg-[#262626] border border-[#333333] p-8 rounded-3xl">
+                    <input type="text" id="bdUser" placeholder="ID" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-xl px-4 py-3 text-sm mb-3">
+                    <input type="password" id="bdPass" placeholder="Token" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-xl px-4 py-3 text-sm mb-6">
                     <button onclick="tryBackdoor()" class="w-full py-3 btn-primary rounded-xl font-bold uppercase text-[10px] mb-4">Confirm</button>
                     <button onclick="hideBackdoor()" class="text-neutral-500 text-[9px] font-bold uppercase tracking-widest">Cancel</button>
                 </div>
@@ -265,33 +267,60 @@ function generateUI(cfg) {
             <div id="explorerView" class="view-section hidden">
                 <div id="explorerContent"></div>
             </div>
-            <div id="configView" class="view-section hidden">
+            <div id="configView" class="view-section hidden text-left">
                 <button onclick="toggleView('dashboard')" class="mb-6 text-neutral-500 hover:text-[#f97316] font-bold text-[10px] uppercase tracking-widest"><i class="fas fa-arrow-left mr-2"></i> Dashboard</button>
-                <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                    <div class="bg-neutral-900 border border-neutral-800 rounded-2xl p-8 lg:col-span-2">
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
+                    <!-- Identity Panel -->
+                    <div class="bg-[#262626] border border-[#333333] rounded-2xl p-8">
                         <h2 class="text-xs font-black text-white mb-6 uppercase tracking-widest">Identity & Alerts</h2>
                         <div class="space-y-4">
-                            <input type="text" id="cfgTitle" class="w-full bg-black border border-neutral-800 rounded-lg px-4 py-2 text-xs text-white" placeholder="Network Alias">
-                            <input type="text" id="cfgLogo" class="w-full bg-black border border-neutral-800 rounded-lg px-4 py-2 text-xs text-white" placeholder="Logo URL">
-                            <input type="text" id="cfgWebhook" class="w-full bg-black border border-neutral-800 rounded-lg px-4 py-2 text-xs text-white" placeholder="Webhook">
-                            <button onclick="saveConfig()" class="w-full py-3 btn-primary rounded-lg font-black uppercase text-[10px]">Save Changes</button>
+                            <div>
+                                <label class="block text-[9px] font-bold text-neutral-500 uppercase mb-2">Network Alias</label>
+                                <input type="text" id="cfgTitle" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-lg px-4 py-2 text-xs text-white" placeholder="Network Alias">
+                            </div>
+                            <div>
+                                <label class="block text-[9px] font-bold text-neutral-500 uppercase mb-2">Logo Asset URL</label>
+                                <input type="text" id="cfgLogo" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-lg px-4 py-2 text-xs text-white" placeholder="Logo URL">
+                            </div>
+                            <div>
+                                <label class="block text-[9px] font-bold text-neutral-500 uppercase mb-2">Google Chat Webhook</label>
+                                <input type="text" id="cfgWebhook" class="w-full bg-[#1a1a1a] border border-[#333333] rounded-lg px-4 py-2 text-xs text-white" placeholder="Webhook">
+                            </div>
+                            <button onclick="saveConfig()" class="w-full py-3 btn-primary rounded-lg font-black uppercase text-[10px] transition-all">Apply Global Changes</button>
                         </div>
                     </div>
-                    <div class="bg-neutral-900 border border-neutral-800 rounded-2xl p-8">
-                        <h2 class="text-xs font-black text-white mb-6 uppercase tracking-widest">Audit</h2>
-                        <div id="auditLogList" class="space-y-1 text-[8px] font-mono text-neutral-400"></div>
+
+                    <!-- Access Panel -->
+                    <div class="bg-[#262626] border border-[#333333] rounded-2xl p-8">
+                        <h2 class="text-xs font-black text-white mb-6 uppercase tracking-widest">Access Control (MFA)</h2>
+                        <div class="space-y-4">
+                            <div class="flex gap-2">
+                                <input type="email" id="newAdminEmail" class="flex-1 bg-[#1a1a1a] border border-[#333333] rounded-lg px-4 py-2 text-xs text-white" placeholder="user@domain.com">
+                                <button onclick="window.addAdmin()" class="px-4 bg-[#333333] hover:bg-[#444] text-white rounded-lg text-xs transition-all"><i class="fas fa-plus"></i></button>
+                            </div>
+                            <div id="adminList" class="space-y-2 max-h-[160px] overflow-y-auto pr-2">
+                                <!-- Populated by JS -->
+                            </div>
+                            <p class="text-[8px] text-neutral-600 uppercase font-bold tracking-tighter">Only accounts listed above can authenticate via Google OAuth.</p>
+                        </div>
                     </div>
+                </div>
+
+                <!-- Audit Log Panel -->
+                <div class="bg-[#262626] border border-[#333333] rounded-2xl p-8">
+                    <h2 class="text-xs font-black text-white mb-6 uppercase tracking-widest">Administrative Audit Trail</h2>
+                    <div id="auditLogList" class="space-y-1 text-[8px] font-mono text-neutral-400"></div>
                 </div>
             </div>
         </main>
 
-        <footer id="mainFooter" class="hidden px-6 py-4 border-t border-neutral-900 text-[8px] font-bold text-neutral-600 flex justify-between items-center bg-[#0a0a0a]">
+        <footer id="mainFooter" class="hidden px-6 py-4 border-t border-neutral-900 text-[8px] font-bold text-neutral-600 flex justify-between items-center bg-[#1a1a1a]">
             <div class="flex items-center gap-6">
                 <span>&copy; 2026 OBSERVER INTELLIGENCE</span>
                 <span class="text-neutral-800">|</span>
                 <span>SYSTEM VERSION: v${VERSION}</span>
                 <span class="text-neutral-800">|</span>
-                <button onclick="toggleView('dashboard')" class="hover:text-white transition-colors">DASHBOARD</button>
+                <button onclick="toggleView('dashboard')" class="hover:text-white transition-colors uppercase">Hub</button>
             </div>
         </footer>
 
@@ -384,6 +413,41 @@ function generateUI(cfg) {
                 list.innerHTML = logs.map(l => \`<div>[\${new Date(l.timestamp).toLocaleTimeString()}] \${l.action} // \${l.target}</div>\`).join('');
             }
 
+            function updateAdminList() {
+                const list = document.getElementById('adminList');
+                if (!list) return;
+                list.innerHTML = (currentSettings.allowedAdmins || []).map(email => \`
+                    <div class="flex justify-between items-center bg-[#1a1a1a] p-3 rounded-xl border border-[#333333]">
+                        <span class="text-[10px] font-bold text-neutral-400 font-mono">\${email}</span>
+                        <button onclick="window.removeAdmin('\${email}')" class="text-neutral-700 hover:text-red-500 transition-colors"><i class="fas fa-times"></i></button>
+                    </div>
+                \`).join('');
+            }
+
+            window.addAdmin = async () => {
+                const emailInput = document.getElementById('newAdminEmail');
+                const email = emailInput.value.trim();
+                if(!email) return;
+                const admins = [...(currentSettings.allowedAdmins || [])];
+                if(!admins.includes(email)) admins.push(email);
+                await saveSettings({ allowedAdmins: admins });
+                emailInput.value = "";
+                await refreshData();
+            };
+
+            window.removeAdmin = async (email) => {
+                const admins = (currentSettings.allowedAdmins || []).filter(e => e !== email);
+                await saveSettings({ allowedAdmins: admins });
+                await refreshData();
+            };
+
+            async function refreshData() {
+                const r = await fetch('/api/status');
+                const j = await r.json();
+                currentSettings = j.settings;
+                updateAdminList();
+            }
+
             function updateBranding() {
                 document.getElementById('headerTitle').innerText = currentSettings.siteTitle || "HUB";
                 document.getElementById('headerLogo').src = currentSettings.logoUrl || "";
@@ -393,6 +457,7 @@ function generateUI(cfg) {
                 document.querySelectorAll('.view-section').forEach(s => s.classList.add('hidden'));
                 document.getElementById(view + 'View').classList.remove('hidden');
                 activeNodeId = (view === 'dashboard') ? null : activeNodeId;
+                if (view === 'config') updateAdminList();
             };
 
             function renderList(filter) {
@@ -426,7 +491,6 @@ function generateUI(cfg) {
                 if(!n) return;
 
                 const latestMetric = n.metricsHistory?.[n.metricsHistory.length - 1] || { cpu: 0, ram: 0, disk: 0 };
-                
                 const cpuColor = getStatusColor(latestMetric.cpu);
                 const ramColor = getStatusColor(latestMetric.ram);
                 const diskColor = getStatusColor(latestMetric.disk);
@@ -488,12 +552,25 @@ function generateUI(cfg) {
                 \`;
             }
 
+            async function saveSettings(extra = {}) {
+                const adminEmail = document.getElementById('adminEmailDisplay').innerText;
+                const data = { 
+                    siteTitle: document.getElementById('cfgTitle').value || currentSettings.siteTitle, 
+                    logoUrl: document.getElementById('cfgLogo').value || currentSettings.logoUrl,
+                    webhookUrl: document.getElementById('cfgWebhook').value || currentSettings.webhookUrl,
+                    adminEmail,
+                    ...extra 
+                };
+                await fetch('/api/update-settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
+            }
+
             function render() {
                 const filter = (document.getElementById('globalFilter').value || "").toLowerCase();
                 if (activeNodeId) renderExplorer();
                 else renderList(filter);
             }
 
+            window.saveConfig = async () => { await saveSettings(); toggleView('dashboard'); };
             document.getElementById("globalFilter").addEventListener("input", render);
         </script>
     </body>
