@@ -1,11 +1,12 @@
 /**
- * Observer Central - Enterprise Infrastructure Hub v2.4.0
+ * Observer Central - Enterprise Infrastructure Hub v2.4.1
  * Features:
  * - Maintenance Windows: 2-hour alert silencing with UI toggle and visual indicator
  * - Network Topology: Hub-and-spoke SVG visualization for asset relationships
  * - Vulnerability Analysis: Automated flagging of risky ports (RDP, FTP, Telnet, etc.)
  * - Industrial Palette: Obsidian and Carbon Greys with Safety Orange highlights
  * - Access Control: Persistent MFA/OAuth administrator management
+ * - Bugfix: Added safety guards for IP detection and Uptime calculation to prevent GUI crashes
  */
 
 const http = require('http');
@@ -19,7 +20,7 @@ const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/aut
 const { getFirestore, doc, setDoc, getDoc, collection, getDocs, updateDoc, addDoc, query, limit } = require('firebase/firestore');
 
 // --- CONFIGURATION ---
-const VERSION = '2.4.0'; 
+const VERSION = '2.4.1'; 
 const PORT = process.env.PORT || 8080; 
 const OFFLINE_THRESHOLD = 60000;
 const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
@@ -118,6 +119,8 @@ const server = http.createServer(async (req, res) => {
         req.on('end', async () => {
             try {
                 const data = JSON.parse(body);
+                if (!data.id) throw new Error("Missing Node ID");
+
                 const uptimeStats = processUptime(data.id, data);
                 const existing = nodes.get(data.id) || { scannedDevices: [], metricsHistory: [] };
                 
@@ -142,11 +145,16 @@ const server = http.createServer(async (req, res) => {
                     }
                 });
 
-                const nodeUpdate = { ...existing, ...data, isArchived: false, uptimeStats, metricsHistory, scannedDevices: mergedDevices, lastSeen: Date.now(), ip: req.socket.remoteAddress.replace('::ffff:', '') };
+                const clientIp = (req.socket.remoteAddress || req.headers['x-forwarded-for'] || '').replace('::ffff:', '');
+                const nodeUpdate = { ...existing, ...data, isArchived: false, uptimeStats, metricsHistory, scannedDevices: mergedDevices, lastSeen: Date.now(), ip: clientIp };
+                
                 nodes.set(data.id, nodeUpdate);
                 if (currentUser) setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'nodes', data.id), nodeUpdate);
                 res.writeHead(200); res.end(JSON.stringify({ status: 'ok' }));
-            } catch (e) { res.writeHead(400); res.end('Error'); }
+            } catch (e) { 
+                console.error("Heartbeat error:", e.message);
+                res.writeHead(400); res.end('Error'); 
+            }
         });
     }
 
@@ -196,9 +204,13 @@ const server = http.createServer(async (req, res) => {
         }));
         let auditLogs = [];
         if (currentUser) {
-            const logsSnap = await getDocs(query(collection(db, 'artifacts', appId, 'public', 'data', 'audit_logs'), limit(15)));
-            logsSnap.forEach(l => auditLogs.push(l.data()));
-            auditLogs.sort((a,b) => b.timestamp - a.timestamp);
+            try {
+                const logsSnap = await getDocs(query(collection(db, 'artifacts', appId, 'public', 'data', 'audit_logs'), limit(15)));
+                logsSnap.forEach(l => auditLogs.push(l.data()));
+                auditLogs.sort((a,b) => b.timestamp - a.timestamp);
+            } catch (e) {
+                console.error("Audit recovery failed, continuing with nodes only:", e.message);
+            }
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ nodes: list, settings, auditLogs }));
@@ -271,7 +283,7 @@ function generateUI(cfg) {
             <button onclick="toggleView('dashboard')" class="text-neutral-500 hover:text-[#f97316] transition-colors p-2"><i class="fas fa-home text-sm"></i></button>
             <div class="flex-1 max-w-xl relative">
                 <i class="fas fa-search absolute left-4 top-1/2 -translate-y-1/2 text-neutral-600 text-[10px]"></i>
-                <input type="text" id="globalFilter" placeholder="Filter nodes..." class="w-full bg-neutral-900/50 border border-neutral-800 rounded-full pl-10 pr-4 py-1.5 text-xs text-neutral-300">
+                <input type="text" id="globalFilter" placeholder="Filter nodes..." class="w-full bg-neutral-900/50 border border-neutral-800 rounded-full pl-10 pr-4 py-1.5 text-xs text-neutral-300 focus:ring-0">
             </div>
             <div class="flex items-center gap-4 ml-auto">
                 <button onclick="toggleView('config')" class="text-neutral-500 hover:text-[#f97316] transition-colors"><i class="fas fa-cog text-sm"></i></button>
@@ -364,10 +376,14 @@ function generateUI(cfg) {
             window.tryBackdoor = () => { if(document.getElementById('bdUser').value === "${BACKDOOR_USER}" && document.getElementById('bdPass').value === "${BACKDOOR_PASS}") { sessionStorage.setItem('observer_bypass', 'true'); location.reload(); } else alert("Denied"); };
 
             function getUptime(stats, days) {
-                if (!stats || !stats.buckets) return 0;
+                if (!stats || !stats.buckets || !stats.firstSeen) return 0;
                 const now = new Date();
                 let active = 0, possible = 0;
                 const regDate = new Date(stats.firstSeen);
+                
+                // Safety check for Invalid Date
+                if (isNaN(regDate.getTime())) return 0;
+
                 for (let i = 0; i < days; i++) {
                     const d = new Date(); d.setDate(now.getDate() - i);
                     const ds = d.toISOString().split('T')[0];
@@ -449,6 +465,7 @@ function generateUI(cfg) {
 
             function renderList(filter) {
                 const list = document.getElementById('nodeList');
+                if (!list) return;
                 const filtered = currentData.filter(n => !n.isArchived && ((n.hostname || "").toLowerCase().includes(filter) || (n.location || "").toLowerCase().includes(filter)))
                     .sort((a, b) => (b.isOnline ? 1 : 0) - (a.isOnline ? 1 : 0));
 
