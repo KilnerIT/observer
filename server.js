@@ -1,11 +1,11 @@
 /**
- * Observer Central - Enterprise Infrastructure Hub v1.9.5
+ * Observer Central - Enterprise Infrastructure Hub v1.9.6
  * Features:
+ * - Bugfix: Escaped all nested template literals to resolve SyntaxError
  * - Unified Header: Title, Stats, and Search condensed into top navigation
- * - Greyscale Palette: Professional monochrome UI (Neutral Greys & White)
+ * - Monochrome Industrial Palette: Professional grey/white/black UI
  * - Notification Webhooks: Google Chat Webhook support with Mute control
  * - System Footer: Version tracking and quick-link navigation
- * - High-Density List View: Optimized for large-scale deployments
  */
 
 const http = require('http');
@@ -19,7 +19,7 @@ const { getAuth, signInAnonymously, onAuthStateChanged } = require('firebase/aut
 const { getFirestore, doc, setDoc, getDoc, collection, getDocs, updateDoc } = require('firebase/firestore');
 
 // --- CONFIGURATION ---
-const VERSION = '1.9.5'; 
+const VERSION = '1.9.6'; 
 const PORT = process.env.PORT || 8080; 
 const OFFLINE_THRESHOLD = 60000;
 const GITHUB_REPO = 'https://github.com/KilnerIT/observer.git';
@@ -181,7 +181,6 @@ function generateUI(cfg) {
         </style>
     </head>
     <body class="min-h-screen antialiased flex flex-col">
-        <!-- Auth View -->
         <div id="authView" class="fixed inset-0 z-[200] bg-[#0a0a0a] flex items-center justify-center p-6">
             <div class="max-w-md w-full text-center">
                 <div class="mb-12">
@@ -207,24 +206,20 @@ function generateUI(cfg) {
             </div>
         </div>
 
-        <!-- Unified Navigation Bar -->
         <nav id="adminBar" class="hidden sticky top-0 z-[100] nav-blur px-6 py-3 flex items-center gap-8">
             <div class="flex items-center gap-3 min-w-max">
                 <img id="headerLogo" src="" class="w-6 h-6 object-contain grayscale" alt="">
                 <h1 id="headerTitle" class="text-sm font-black text-white tracking-tight uppercase"></h1>
             </div>
-
             <div class="flex-1 max-w-xl relative">
                 <i class="fas fa-search absolute left-4 top-1/2 -translate-y-1/2 text-neutral-600 text-xs"></i>
                 <input type="text" id="globalFilter" placeholder="Search infrastructure..." class="w-full bg-neutral-900/50 border border-neutral-800 rounded-full pl-10 pr-4 py-1.5 text-xs text-neutral-300 focus:ring-0">
             </div>
-
             <div class="flex items-center gap-6 text-[10px] font-black uppercase tracking-widest text-neutral-500">
                 <div class="flex items-center gap-2"><span id="statNodes" class="text-white">-</span> Nodes</div>
                 <div class="flex items-center gap-2"><span id="statFleet" class="text-white">-</span> Assets</div>
                 <div class="flex items-center gap-2 text-emerald-500"><span id="statHealth" class="text-white">-%</span> Health</div>
             </div>
-
             <div class="flex items-center gap-4 ml-auto">
                 <button onclick="toggleView('config')" class="text-neutral-500 hover:text-white transition-colors"><i class="fas fa-cog text-sm"></i></button>
                 <div class="h-4 w-px bg-neutral-800"></div>
@@ -233,20 +228,17 @@ function generateUI(cfg) {
             </div>
         </nav>
 
-        <!-- Main Content -->
         <main id="mainApp" class="hidden flex-1 p-6 max-w-7xl mx-auto w-full">
             <div id="dashboardView" class="view-section">
                 <div class="flex flex-col gap-2" id="nodeList"></div>
             </div>
-
             <div id="explorerView" class="view-section hidden">
                 <button onclick="toggleView('dashboard')" class="mb-6 text-neutral-500 hover:text-white font-bold text-[10px] uppercase tracking-widest"><i class="fas fa-arrow-left mr-2"></i> Dashboard</button>
                 <div id="explorerContent"></div>
             </div>
-
             <div id="configView" class="view-section hidden">
                 <button onclick="toggleView('dashboard')" class="mb-6 text-neutral-500 hover:text-white font-bold text-[10px] uppercase tracking-widest"><i class="fas fa-arrow-left mr-2"></i> Exit Settings</button>
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 text-left">
                     <div class="bg-neutral-900 border border-neutral-800 rounded-2xl p-8">
                         <h2 class="text-xs font-black text-white mb-8 uppercase tracking-[0.2em]">Environment Identity</h2>
                         <div class="space-y-6">
@@ -271,7 +263,7 @@ function generateUI(cfg) {
                                     </label>
                                 </div>
                             </div>
-                            <button onclick="saveConfig()" class="w-full py-3 bg-white text-black rounded-lg font-black uppercase text-[10px] transition-transform active:scale-95">Commit Changes</button>
+                            <button onclick="saveConfig()" class="w-full py-3 bg-white text-black rounded-lg font-black uppercase text-[10px]">Commit Changes</button>
                         </div>
                     </div>
                     <div class="bg-neutral-900 border border-neutral-800 rounded-2xl p-8">
@@ -286,18 +278,16 @@ function generateUI(cfg) {
             </div>
         </main>
 
-        <!-- Persistent Footer -->
         <footer id="mainFooter" class="hidden px-6 py-4 border-t border-neutral-900 text-[9px] font-bold text-neutral-600 flex justify-between items-center bg-[#0a0a0a]">
             <div class="flex items-center gap-6">
                 <span>&copy; 2026 OBSERVER INTELLIGENCE</span>
                 <span class="text-neutral-800">|</span>
-                <span class="uppercase">Build: v${VERSION}</span>
+                <span>BUILD: v\${VERSION}</span>
                 <span class="text-neutral-800">|</span>
                 <span class="flex items-center gap-2"><span class="w-1.5 h-1.5 rounded-full bg-emerald-500 opacity-50"></span> SYSTEM NOMINAL</span>
             </div>
             <div class="flex items-center gap-6 uppercase tracking-widest">
                 <a href="#" class="hover:text-white transition-colors">Documentation</a>
-                <a href="#" class="hover:text-white transition-colors">Support</a>
                 <a href="#" class="hover:text-white transition-colors">Audit Logs</a>
             </div>
         </footer>
@@ -321,8 +311,6 @@ function generateUI(cfg) {
                 app: document.getElementById('mainApp'),
                 nav: document.getElementById('adminBar'),
                 footer: document.getElementById('mainFooter'),
-                error: document.getElementById('authError'),
-                loading: document.getElementById('authLoading'),
                 email: document.getElementById('adminEmailDisplay')
             };
 
@@ -353,7 +341,6 @@ function generateUI(cfg) {
                 const json = await res.json();
                 currentSettings = json.settings;
                 const allowed = currentSettings.allowedAdmins || [];
-
                 if (backdoorActive || (user && allowed.includes(user.email))) {
                     ui.auth.classList.add('hidden');
                     ui.app.classList.remove('hidden');
@@ -363,9 +350,6 @@ function generateUI(cfg) {
                     initApp(json);
                 } else {
                     ui.auth.classList.remove('hidden');
-                    ui.app.classList.add('hidden');
-                    ui.nav.classList.add('hidden');
-                    ui.footer.classList.add('hidden');
                 }
             });
 
@@ -411,12 +395,12 @@ function generateUI(cfg) {
 
             function updateAdminList() {
                 const list = document.getElementById('adminList');
-                list.innerHTML = (currentSettings.allowedAdmins || []).map(email => `
+                list.innerHTML = (currentSettings.allowedAdmins || []).map(email => \`
                     <div class="flex justify-between items-center bg-black p-3 rounded-xl border border-neutral-800">
-                        <span class="text-[10px] font-bold text-neutral-400 font-mono">${email}</span>
-                        <button onclick="window.removeAdmin('${email}')" class="text-neutral-700 hover:text-red-500"><i class="fas fa-times"></i></button>
+                        <span class="text-[10px] font-bold text-neutral-400 font-mono">\${email}</span>
+                        <button onclick="window.removeAdmin('\${email}')" class="text-neutral-700 hover:text-red-500"><i class="fas fa-times"></i></button>
                     </div>
-                `).join('');
+                \`).join('');
             }
 
             window.addAdmin = async () => {
@@ -462,7 +446,7 @@ function generateUI(cfg) {
                 list.innerHTML = filtered.map(n => {
                     const u7 = getUptime(n.uptimeStats, 7);
                     return \`
-                    <div class="node-row rounded-xl p-4 flex items-center gap-8">
+                    <div class="node-row rounded-xl p-4 flex items-center gap-8 text-left">
                         <div class="w-1.5 h-1.5 rounded-full \${n.isOnline ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' : 'bg-red-500'}"></div>
                         <div class="flex-1 min-w-0">
                             <h3 class="text-sm font-black text-white uppercase tracking-tight truncate">\${n.location || n.hostname}</h3>
@@ -491,13 +475,13 @@ function generateUI(cfg) {
                 if(!n) return;
                 const devices = (n.scannedDevices || []).filter(c => c.ip.includes(f) || c.name.toLowerCase().includes(f));
                 grid.innerHTML = \`
-                    <div class="bg-neutral-900 border border-neutral-800 rounded-2xl p-6 mb-6 flex justify-between items-center">
+                    <div class="bg-neutral-900 border border-neutral-800 rounded-2xl p-6 mb-6 flex justify-between items-center text-left">
                         <div>
                             <h2 class="text-2xl font-black text-white uppercase tracking-tighter">\${n.location || n.hostname}</h2>
                             <p class="text-neutral-500 text-[8px] font-bold uppercase tracking-widest tracking-[0.4em]">\${n.hostname} Discovery Log</p>
                         </div>
                     </div>
-                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 text-left">
                         \${devices.map(c => \`
                             <div class="bg-neutral-900 border border-neutral-800 p-4 rounded-xl flex flex-col justify-between">
                                 <div>
